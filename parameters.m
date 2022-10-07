@@ -17,3 +17,15 @@ R3 = 40;
 X1 = 0;
 X2 = 0;
 X3 = 0;
+
+%%
+for i=1:4
+%Run simulink simulation
+simOut=sim('CPG.slx',10);
+%%Data extraction
+outVariable=get(simOut,'yout');
+simOut.theta1
+if i==2
+pause(10)
+end
+end
