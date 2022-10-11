@@ -23,13 +23,7 @@ rng default % For reproducibility
 options = optimoptions('ga','PlotFcn', @gaplotbestf);
 x = ga(@(x) animal(x(1),x(2),x(3)),3,options)
 %%
-for i=1:4
-%Run simulink simulation
-simOut=sim('CPG.slx',10);
-%%Data extraction
-outVariable=get(simOut,'yout');
-simOut.x.Data(end)
-if i==2
-pause(10)
-end
-end
+omega1 = -64.1138;
+omega2 = -281.0089;
+omega3 = 93.1018;
+simOut=sim('chain_CPG.slx', 100);
