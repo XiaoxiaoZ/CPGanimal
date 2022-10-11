@@ -1,5 +1,3 @@
-clear
-clc
 omega1 = 0;
 omega2 = 0;
 omega3 = 0;
@@ -20,8 +18,7 @@ X1 = 0;
 X2 = 0;
 X3 = 0;
 rng default % For reproducibility
-options = optimoptions('ga','PlotFcn', @gaplotbestf);
-x = ga(@(x) animal(x(1),x(2),x(3)),3,options)
+x = ga(@animal,3)
 %%
 for i=1:4
 %Run simulink simulation
