@@ -43,5 +43,4 @@ phase = -25.224171789139007
 [meta]
 trained_for = "sumo"
 fitness = 1.6981447769209157
-generations = 30
 evaluations = 1440

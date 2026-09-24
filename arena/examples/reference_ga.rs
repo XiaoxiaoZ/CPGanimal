@@ -1,9 +1,13 @@
-//! A small real-coded genetic algorithm with an ask/tell interface.
+//! Reference solution for teachers: a real-coded GA (tournament selection,
+//! BLX-α crossover, Gaussian mutation, elitism) on top of the same
+//! [`Problem`] interface students use. Remove this file before handing the
+//! repository to students if you don't want them to see a solution.
 //!
-//! Genomes live in [0, 1]^n. The GA knows nothing about creatures: it only
-//! proposes vectors (`ask`) and receives their fitness (`tell`, higher is
-//! better). Any other optimiser can replace it as long as it speaks the same
-//! two verbs.
+//! cargo run --release --example reference_ga -- creatures/worm.toml [race|sumo] [budget] [out.toml]
+
+use cpg_arena::game::Mode;
+use cpg_arena::problem::Problem;
+use std::path::Path;
 
 /// SplitMix64: tiny, fast, reproducible.
 #[derive(Clone, Debug)]
@@ -159,23 +163,23 @@ impl Ga {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn solves_a_sphere() {
-        let target = [0.2, 0.8, 0.5, 0.33];
-        let mut ga = Ga::new(4, GaConfig { seed: 7, ..Default::default() }, &[]);
-        for _ in 0..60 {
-            let fit = ga
-                .ask()
-                .iter()
-                .map(|g| -g.iter().zip(&target).map(|(a, b)| (a - b).powi(2)).sum::<f64>())
-                .collect();
-            ga.tell(fit);
-        }
-        let (_, f) = ga.best().unwrap();
-        assert!(f > -1e-3, "best {f}");
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let template = args.first().map_or("creatures/worm.toml", String::as_str);
+    let mode = if args.get(1).is_some_and(|m| m == "sumo") { Mode::Sumo } else { Mode::Race };
+    let budget: usize = args.get(2).and_then(|b| b.parse().ok()).unwrap_or(1000);
+    let opponents = (mode == Mode::Sumo).then(|| Path::new(template).parent().unwrap_or(Path::new(".")).to_path_buf());
+    let p = Problem::load(Path::new(template), mode, false, opponents.as_deref(), None).expect("problem");
+    let cfg = GaConfig { population: 50, ..Default::default() };
+    let mut ga = Ga::new(p.dim(), cfg, &[p.start()]);
+    while p.evaluations() < budget {
+        let fit = p.evaluate_batch(ga.ask()).expect("valid genomes");
+        ga.tell(fit);
+        println!("evaluations {:5}  best {:8.3}", p.evaluations(), ga.best().map_or(f64::NAN, |b| b.1));
+    }
+    if let (Some(out), Some((g, _))) = (args.get(3), ga.best()) {
+        let f = p.save(g, Path::new(out), Some("Reference GA")).expect("save");
+        println!("fitness {f:.3} -> {out}");
     }
 }

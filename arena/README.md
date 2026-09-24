@@ -1,6 +1,6 @@
-# CPG Arena: 用遗传算法进化人造生物
+# CPG Arena: 自己写遗传算法，进化人造生物
 
-一个轻量级的教学游戏。每个学生设计一只由方块和关节组成的 2D 生物，用 **CPG（中枢模式发生器）** 驱动关节，用 **遗传算法（GA）** 进化参数，再把生物文件放进同一个文件夹里，**赛跑**比谁跑得远，或者 **相扑**比谁把对手推下台。
+一个轻量级的教学游戏。每个学生设计一只由方块和关节组成的 2D 生物，关节由 **CPG（中枢模式发生器）** 驱动。学生**自己写遗传算法**进化它的参数，然后把生物文件放进同一个文件夹里比赛：**赛跑**比谁跑得远，**相扑**比谁把对手推下台。
 
 | 赛跑（每只生物一条赛道） | 相扑（循环赛 + 决赛回放） |
 |---|---|
@@ -14,23 +14,22 @@
 
 ```bash
 cd arena
-cargo build --release              # 需要 Rust ≥ 1.92
-
-# 打开界面，显示 creatures/ 文件夹里的所有生物
-./target/release/arena-gui creatures
+cargo build --release                        # 需要 Rust ≥ 1.92
+./target/release/arena-gui creatures         # 打开界面
+python3 python/my_ga.py                      # 跑一遍 GA 骨架
 ```
 
 Linux 如果报 `libxkbcommon-x11.so could not be loaded`：`sudo apt install libxkbcommon-x11-0`。
-在没有图形界面的服务器上，可以用 `cargo build --release --no-default-features` 只编译命令行工具。
+只要命令行工具（比如在服务器上）：`cargo build --release --no-default-features`。
 
 ---
 
-## 游戏流程（学生）
+## 学生要做什么
 
 ```text
-1. 设计身体           2. 进化                        3. 提交              4. 比赛
-worm.toml  ──────▶  arena train ... --out me.toml ──▶ 拷进班级文件夹 ──▶ arena-gui 班级文件夹
-（手写拓扑）        （GA 调参数，可选连身体一起进化）                    （自动刷新）
+1. 设计身体             2. 写 GA 进化参数                  3. 提交                 4. 比赛
+worm.toml  ─────────▶  python/my_ga.py  ──────────────▶  me.toml 拷进班级文件夹 ──▶ arena-gui 班级文件夹
+（手写拓扑）           （选择 / 交叉 / 变异由你实现）                             （自动刷新）
 ```
 
 ### 1. 设计身体：生物文件
@@ -61,55 +60,86 @@ offset = 0.0                # 摆动中心的偏移（度）
 phase = 90.0                # 这个关节的相位（度），关节之间的相位差决定步态
 ```
 
-每个关节的角度是 `angle + offset + amplitude·cos(ψ)`，ψ 是 CPG 的相位。示例见 [`creatures/`](creatures)：`worm`（蠕虫）、`walker`（两条腿）、`tailfin`（尾巴），以及它们进化后的版本。
+每个关节的角度是 `angle + offset + amplitude·cos(ψ)`，ψ 是 CPG 的相位。示例见 [`creatures/`](creatures)：`worm`（蠕虫）、`walker`（两条腿）、`tailfin`（尾巴），以及它们进化后的版本。字段写错（比如 `amplitud`）会直接报错，不会被悄悄忽略。
 
-### 2. 进化
+### 2. 写遗传算法：接口
 
-**方式 A：用内置 GA**
+**身体拓扑是你设计的，GA 负责填数字。** 对 GA 来说，模拟器是一个黑盒优化问题：
 
-```bash
-# 只进化 CPG 参数（频率、幅度、偏移、相位），身体不变
-./target/release/arena train creatures/worm.toml --mode race --out creatures/my-worm.toml --name "我的虫"
+| 概念 | 含义 |
+|---|---|
+| 基因组 genome | `dim` 个 **[0, 1]** 之间的浮点数（超出会被截断） |
+| 适应度 fitness | 一个浮点数，**越大越好**；同一个基因组永远得到同样的结果（确定性） |
+| 起点 start | 你手写的那只生物对应的基因组，可以放进初始种群 |
 
-# 连身体一起进化（各节长短粗细、挂接位置、角度），拓扑仍是你设计的
-./target/release/arena train creatures/walker.toml --mode race --body --generations 40 --out ...
+每个基因映射到什么物理量（频率、每个关节的幅度/偏移/相位；加 `body` 后还有各节尺寸和角度），可以用 `arena info` 查看。写 GA 并不需要知道这些，但调试时很有用。
 
-# 相扑：对着文件夹里的其他生物练（没有对手时对着一块石头练）
-./target/release/arena train creatures/tailfin.toml --mode sumo --opponents creatures --out ...
+#### Python（[`python/arena.py`](python/arena.py)，只用标准库）
+
+```python
+from arena import Problem
+
+p = Problem("creatures/worm.toml", mode="race")   # mode: "race" 或 "sumo"
+# 可选参数：body=True 连身体一起进化；opponents="班级文件夹" 相扑对手；rules="arena.toml"
+
+p.dim                        # 基因个数
+p.start                      # 模板生物对应的基因组
+p.genes                      # 每个基因的名字
+fit = p.evaluate(population) # [[...], [...], ...] -> [f1, f2, ...]，整代并行评估
+p.evaluations                # 已经评估了多少个基因组
+p.describe(genome)           # 把基因翻译成物理量，调试用
+p.save(best, "me.toml", name="我的冠军")   # 写成生物文件，返回适应度
 ```
 
-可调参数：`--generations`、`--population`、`--sigma`（变异强度）、`--seed`。每一代的最好/平均适应度会写到 `<out>.history.csv`，可以拿来画收敛曲线。
+**一代调用一次 `evaluate`**（传整个种群），不要一个个体调一次：整代在 Rust 里多核并行跑，一次 15 秒的赛跑只要约 10 ms。
 
-**方式 B：自己写 GA（任何语言）**
+起点文件：
+- [`python/my_ga.py`](python/my_ga.py)：GA 骨架，已经能跑，但 `select` / `crossover` / `mutate` 三个函数是占位的（进化不动）。**这是学生要填的地方。**
+- [`python/random_search.py`](python/random_search.py)：随机搜索基线。**你的 GA 在相同评估次数（BUDGET）下应该打败它。**
 
-模拟器是一个黑盒：输入 [0,1] 之间的一串基因，输出适应度。
+参考数据（worm，赛跑，1000 次评估）：占位骨架 3.6 m，随机搜索 8.1 m，一个普通的 GA 约 11 m。
+
+#### 其他语言：命令行协议
+
+Python 包装只是调用下面这几个命令，任何语言都可以直接用：
 
 ```bash
-./target/release/arena genes creatures/worm.toml          # 每个基因的含义和范围
-./target/release/arena eval creatures/worm.toml --genes 0.3,0.5,... --mode race
-# {"fitness": 12.3, "mode": "race", "name": "Worm"}
-./target/release/arena eval ... --genes ... --out creatures/me.toml --name "我的冠军"
+arena info  creatures/worm.toml [--json]          # 基因个数、名字、范围、起点
+arena batch creatures/worm.toml < pop.txt         # stdin 每行一个基因组（逗号或空格分隔）
+                                                  # stdout 每行一个适应度，顺序相同，整批并行
+arena eval  creatures/worm.toml --genes 0.3,0.5,...   # 单个基因组
+arena save  creatures/worm.toml --genes ... --out me.toml --name "我的冠军"
 ```
 
-[`examples/my_ga.py`](examples/my_ga.py) 是一个只用 Python 标准库、约 60 行的最小 GA，可以从这里开始改选择、交叉和变异。
+四个命令都接受同样的问题参数：`--mode race|sumo`、`--body`、`--opponents <文件夹>`、`--rules <arena.toml>`。基因组长度不对或含 NaN 时，命令以非零状态退出并在 stderr 说明原因。
+
+#### Rust
+
+```rust
+use cpg_arena::{game::Mode, problem::Problem};
+let p = Problem::load("creatures/worm.toml".as_ref(), Mode::Race, false, None, None)?;
+let fit: Vec<f64> = p.evaluate_batch(&population)?;   // rayon 并行
+p.save(&best, "me.toml".as_ref(), Some("我的冠军"))?;
+```
 
 ### 3. 比赛
 
 ```bash
-./target/release/arena-gui 班级文件夹            # 界面：勾选生物 → Start race / Tournament
-./target/release/arena-gui 班级文件夹 --race     # 打开就开始赛跑（投屏用）
-./target/release/arena race 班级文件夹           # 命令行排行榜
-./target/release/arena tournament 班级文件夹     # 命令行相扑循环赛
-./target/release/arena check 班级文件夹          # 检查所有文件是否合规
+./target/release/arena-gui 班级文件夹              # 界面：勾选生物 → Start race / Tournament
+./target/release/arena-gui 班级文件夹 --race       # 打开就开始赛跑（投屏用）
+./target/release/arena-gui 班级文件夹 --tournament # 打开就开始相扑循环赛，结束后回放决赛
+./target/release/arena race 班级文件夹             # 命令行排行榜
+./target/release/arena tournament 班级文件夹       # 命令行相扑循环赛
+./target/release/arena check 班级文件夹            # 检查所有文件是否合规
 ```
 
 界面每秒检查一次文件夹，有新文件或改动会自动重新加载。不合规的文件会在左侧用红字标出原因。
 
 ---
 
-## 规则（教师）
+## 规则与评分（教师）
 
-所有生物遵守同一套规则，保证公平：**身体越大越重，但每个关节的电机都一样**。默认值在 [`creature.rs`](src/creature.rs) 的 `Rules::default()`，在班级文件夹里放一个 `arena.toml` 就能覆盖任意一项：
+所有生物遵守同一套规则：**身体越大越重，但每个关节的电机都一样**。默认值在 [`creature.rs`](src/creature.rs) 的 `Rules::default()`，在班级文件夹里放一个 `arena.toml` 可以覆盖任意一项（写错字段名会报错）：
 
 ```toml
 # arena.toml（只写要改的项）
@@ -123,12 +153,20 @@ ring_width = 8.0          # 相扑台宽度 (m)
 friction = 0.9
 ```
 
-| 模式 | 适应度 | 胜负 |
+学生在自己的文件夹里进化时，用 `--rules 班级/arena.toml`（Python：`rules=...`）保证和比赛规则一致。
+
+| 模式 | 适应度 | 比赛胜负 |
 |---|---|---|
 | 赛跑 | `race_time` 秒内质心向右移动的距离（米） | 距离排名 |
-| 相扑 | 每个对手：胜 +1 / 平 0 / 负 −1，再加上"场地控制"差值 ∈ [−1, 1] | 掉下台即输；到时间则离中心更近者胜（差距太小算平）；循环赛每对打两场（左右各一次），胜 3 分、平 1 分 |
+| 相扑 | 对每个对手：胜 +1 / 平 0 / 负 −1，加上"场地控制"差值 ∈ [−1, 1]，取平均 | 掉下台即输；到时间则离中心更近者胜（差距太小算平）；循环赛每对打两场（左右各一次），胜 3 分、平 1 分 |
 
-相扑适应度里的连续项是为了给 GA 一个平滑的梯度，否则大多数个体都是 0 分，进化很难起步。这本身就是一个值得在课上讨论的点：**适应度怎么设计，决定了进化出什么**。
+相扑适应度里的连续项是为了给 GA 一个平滑的信号，否则大多数个体都是 0 分，进化很难起步。
+
+**参考答案**：[`examples/reference_ga.rs`](examples/reference_ga.rs) 是一个实数编码 GA（锦标赛选择、BLX-α 交叉、高斯变异、精英保留），用的是和学生相同的接口。分发给学生前可以删掉。
+
+```bash
+cargo run --release --example reference_ga -- creatures/worm.toml race 1000 out.toml
+```
 
 ---
 
@@ -137,26 +175,24 @@ friction = 0.9
 ```text
 arena/
 ├── src/
-│   ├── cpg.rs        # CPG 振荡器网络（RK4），含单元测试
+│   ├── cpg.rs        # CPG 振荡器网络（RK4）
 │   ├── creature.rs   # 生物文件格式、规则、合规检查、基因编解码
 │   ├── sim.rs        # 2D 物理（rapier2d）：搭身体、驱动关节、赛道和相扑台
-│   ├── ga.rs         # 实数编码 GA（锦标赛选择、BLX-α 交叉、高斯变异、精英保留），ask/tell 接口
-│   ├── game.rs       # 适应度、训练循环、文件夹加载、循环赛
+│   ├── problem.rs    # 学生 GA 面对的黑盒接口：dim / start / evaluate_batch / save
+│   ├── game.rs       # 适应度、文件夹加载、循环赛
 │   └── bin/
-│       ├── arena.rs      # 命令行
+│       ├── arena.rs      # 命令行（info / eval / batch / save / check / race / tournament）
 │       └── arena-gui.rs  # 界面（eframe/egui）
-├── creatures/        # 示例生物
-└── examples/my_ga.py # 自己写 GA 的起点
+├── python/           # arena.py 接口、my_ga.py 骨架、random_search.py 基线
+├── examples/         # reference_ga.rs 参考答案（教师）
+└── creatures/        # 示例生物
 ```
-
-`ga.rs` 用 ask/tell 接口，和生物无关：`ask()` 给出一批 [0,1]ⁿ 的基因，`tell(fitness)` 返回适应度。换成 CMA-ES、粒子群或者别的算法，只需要实现这两个方法。
-
-模拟是确定性的：同一个文件、同一套规则，结果完全一样。在 4 核机器上，一次 15 秒赛跑约 10 ms，30 代 × 48 个体的训练约 4 秒。
 
 ## 课堂可以讨论的问题
 
-- 只调 CPG 参数 vs 连身体一起进化，结果差多少？搜索空间变大了多少？
+- 同样 1000 次评估，你的 GA 比随机搜索好多少？换几个随机种子，结论还成立吗？
+- 种群大小、变异强度怎么影响收敛速度和最终结果？探索和利用。
+- 只调 CPG 参数 vs 连身体一起进化（`body=True`）：搜索空间变大了多少，结果更好还是更差？
 - 为赛跑进化的生物，相扑为什么常常打不过（反之亦然）？专才和通才。
-- 相扑里经常出现"石头剪刀布"式的循环克制，没有绝对最强：这和协同进化有什么关系？
+- 相扑里经常出现"石头剪刀布"式的循环克制，没有绝对最强：这和协同进化有什么关系？如果拿对手的冠军来当训练对手呢？
 - GA 找到的"作弊"步态（比如翻个身滑行）：是 bug 还是创新？规则应该怎么改？
-- 固定随机种子 vs 换种子，结果稳定吗？

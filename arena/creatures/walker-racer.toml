@@ -63,5 +63,4 @@ phase = -72.22886809527805
 [meta]
 trained_for = "race"
 fitness = 22.76733821380567
-generations = 40
 evaluations = 1920

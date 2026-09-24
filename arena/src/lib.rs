@@ -4,11 +4,11 @@
 //! - [`creature`]: the file format students edit, the rules, genome encoding
 //! - [`cpg`]: the oscillator network (Sproewitz et al. 2008)
 //! - [`sim`]: 2D physics (rapier2d)
-//! - [`ga`]: a small genetic algorithm with an ask/tell interface
-//! - [`game`]: fitness per mode, training loop, folder loading, tournaments
+//! - [`problem`]: the black-box optimisation interface students' GAs talk to
+//! - [`game`]: fitness per mode, folder loading, tournaments
 
 pub mod cpg;
 pub mod creature;
-pub mod ga;
 pub mod game;
+pub mod problem;
 pub mod sim;

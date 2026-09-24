@@ -1,7 +1,6 @@
-//! Game modes, fitness functions, training loop, and the creatures folder.
+//! Game modes, fitness functions, the creatures folder, and tournaments.
 
-use crate::creature::{Brain, Creature, GenomeSpec, Meta, Rules, Segment};
-use crate::ga::{Ga, GaConfig};
+use crate::creature::{Brain, Creature, Rules, Segment};
 use crate::sim::{run_race, run_sumo};
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
@@ -58,65 +57,6 @@ pub fn fitness(c: &Creature, mode: Mode, rules: &Rules, opponents: &[Creature]) 
             ops.iter().map(|o| sumo_score(c, o, rules)).sum::<f64>() / ops.len() as f64
         }
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct GenStats {
-    pub generation: usize,
-    pub best: f64,
-    pub mean: f64,
-    pub best_ever: f64,
-    pub evaluations: usize,
-}
-
-pub struct TrainOptions {
-    pub mode: Mode,
-    pub generations: usize,
-    pub spec: GenomeSpec,
-    pub ga: GaConfig,
-}
-
-/// Evolve `template` with the GA. Calls `on_generation` after each generation.
-pub fn train(
-    template: &Creature,
-    rules: &Rules,
-    opponents: &[Creature],
-    opts: &TrainOptions,
-    mut on_generation: impl FnMut(&GenStats),
-) -> (Creature, f64) {
-    let spec = opts.spec;
-    let dim = spec.genes(template, rules).len();
-    let start = spec.encode(template, rules);
-    let mut ga = Ga::new(dim, opts.ga.clone(), &[start]);
-    let mut evaluations = 0;
-    for _ in 0..opts.generations {
-        let fit: Vec<f64> = ga
-            .ask()
-            .par_iter()
-            .map(|g| fitness(&spec.decode(template, rules, g), opts.mode, rules, opponents))
-            .collect();
-        evaluations += fit.len();
-        let finite: Vec<f64> = fit.iter().copied().filter(|f| f.is_finite()).collect();
-        let best = finite.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let mean = finite.iter().sum::<f64>() / finite.len().max(1) as f64;
-        ga.tell(fit);
-        on_generation(&GenStats {
-            generation: ga.generation,
-            best,
-            mean,
-            best_ever: ga.best().map_or(f64::NEG_INFINITY, |b| b.1),
-            evaluations,
-        });
-    }
-    let (g, f) = ga.best().expect("at least one generation");
-    let mut best = spec.decode(template, rules, g);
-    best.meta = Some(Meta {
-        trained_for: opts.mode.name().into(),
-        fitness: f,
-        generations: opts.generations,
-        evaluations,
-    });
-    (best, f)
 }
 
 /// One file in the creatures folder.

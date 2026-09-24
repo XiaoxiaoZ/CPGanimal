@@ -344,7 +344,7 @@ impl App {
                         ui.label(RichText::new(info).small().weak());
                         if let Some(m) = &c.meta {
                             ui.label(
-                                RichText::new(format!("trained: {} · fitness {:.2} · {} gens", m.trained_for, m.fitness, m.generations))
+                                RichText::new(format!("trained: {} · fitness {:.2} · {} evals", m.trained_for, m.fitness, m.evaluations))
                                     .small()
                                     .color(Color32::from_rgb(120, 180, 120)),
                             );

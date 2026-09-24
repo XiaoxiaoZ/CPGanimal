@@ -1,95 +1,95 @@
-//! Command-line tool: check, evaluate, train, race, and run tournaments.
+//! Command-line tool. The optimisation interface for your own GA:
+//!
+//! ```text
+//! arena info  worm.toml                 how many genes, what they mean
+//! arena batch worm.toml < pop.txt       one genome per line in, one fitness per line out
+//! arena eval  worm.toml --genes 0.1,…   fitness of one genome
+//! arena save  worm.toml --genes 0.1,… --out me.toml --name "Me"
+//! ```
+//!
+//! Plus `check`, `race` and `tournament` for folders of creatures.
 
-use clap::{Parser, Subcommand};
-use cpg_arena::creature::{Creature, GenomeSpec, Rules};
-use cpg_arena::ga::GaConfig;
-use cpg_arena::game::{self, Mode, TrainOptions};
-use std::io::Write;
+use clap::{Args, Parser, Subcommand};
+use cpg_arena::creature::Rules;
+use cpg_arena::game::{self, Mode};
+use cpg_arena::problem::Problem;
+use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(name = "arena", about = "Evolve CPG creatures with a genetic algorithm")]
+#[command(name = "arena", about = "CPG Arena: evaluate genomes for your own genetic algorithm, race and fight creatures")]
 struct Cli {
-    /// Rules file (defaults to <folder>/arena.toml if present, else built-in rules).
-    #[arg(long, global = true)]
-    rules: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
 
+/// What is being optimised. Same flags for info / eval / batch / save.
+#[derive(Args)]
+struct ProblemArgs {
+    /// Template creature: its body plan (topology) is fixed, the genes fill in the numbers.
+    template: PathBuf,
+    #[arg(long, value_enum, default_value = "race")]
+    mode: Mode,
+    /// Genes also control the body (segment sizes, attach points, angles).
+    #[arg(long)]
+    body: bool,
+    /// Sumo only: fight every creature in this folder (default: the Rock).
+    #[arg(long)]
+    opponents: Option<PathBuf>,
+    /// Rules file (default: arena.toml next to the template, else built-in rules).
+    #[arg(long)]
+    rules: Option<PathBuf>,
+}
+
+impl ProblemArgs {
+    fn problem(&self) -> Problem {
+        Problem::load(&self.template, self.mode, self.body, self.opponents.as_deref(), self.rules.as_deref()).unwrap_or_else(|e| die(&e))
+    }
+}
+
 #[derive(Subcommand)]
 enum Cmd {
-    /// Validate every creature in a folder.
-    Check { folder: PathBuf },
-    /// List the genes of a creature (what the GA can change).
-    Genes {
-        creature: PathBuf,
-        /// Include body genes (sizes, attach points, angles).
+    /// Describe the genome: number of genes, names, ranges, template values.
+    Info {
+        #[command(flatten)]
+        problem: ProblemArgs,
+        /// Machine-readable output.
         #[arg(long)]
-        body: bool,
+        json: bool,
     },
-    /// Print the fitness of a creature as JSON. With --genes, the genes are
-    /// first written into the creature (for your own GA in any language).
+    /// Fitness of one genome (higher is better).
     Eval {
-        creature: PathBuf,
-        #[arg(long, value_enum, default_value = "race")]
-        mode: Mode,
-        /// Folder of sumo opponents (default: the Rock).
-        #[arg(long)]
-        opponents: Option<PathBuf>,
-        /// Comma-separated genes in [0,1], see `arena genes`.
-        #[arg(long, value_delimiter = ',')]
+        #[command(flatten)]
+        problem: ProblemArgs,
+        /// Genes in [0,1], comma-separated. Default: the template itself.
+        #[arg(long, value_delimiter = ',', allow_negative_numbers = true)]
         genes: Option<Vec<f64>>,
-        #[arg(long)]
-        body: bool,
-        /// Write the decoded creature here.
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Rename the creature written with --out.
-        #[arg(long)]
-        name: Option<String>,
     },
-    /// Evolve a creature with the built-in genetic algorithm.
-    Train {
-        /// Starting creature; its body plan (topology) is kept.
-        template: PathBuf,
-        #[arg(long, value_enum, default_value = "race")]
-        mode: Mode,
-        /// Where to write the champion.
+    /// Fitness of a whole population, evaluated in parallel.
+    /// Reads one genome per line from stdin (numbers separated by commas or
+    /// spaces), writes one fitness per line to stdout, in the same order.
+    Batch {
+        #[command(flatten)]
+        problem: ProblemArgs,
+    },
+    /// Turn a genome into a creature file for the arena.
+    Save {
+        #[command(flatten)]
+        problem: ProblemArgs,
+        #[arg(long, value_delimiter = ',', allow_negative_numbers = true)]
+        genes: Vec<f64>,
         #[arg(long)]
         out: PathBuf,
-        /// Name of the champion (default: "<template name> (<mode>)").
+        /// Name shown in the arena (default: the template's name).
         #[arg(long)]
         name: Option<String>,
-        /// Also evolve the body (sizes, attach points, angles).
-        #[arg(long)]
-        body: bool,
-        #[arg(long, default_value_t = 30)]
-        generations: usize,
-        #[arg(long, default_value_t = 48)]
-        population: usize,
-        #[arg(long, default_value_t = 0.1)]
-        sigma: f64,
-        #[arg(long, default_value_t = 1)]
-        seed: u64,
-        /// Folder of sumo sparring partners (default: the Rock).
-        #[arg(long)]
-        opponents: Option<PathBuf>,
     },
+    /// Validate every creature in a folder.
+    Check { folder: PathBuf },
     /// Race every creature in a folder.
     Race { folder: PathBuf },
     /// Sumo round robin between every creature in a folder.
     Tournament { folder: PathBuf },
-}
-
-fn rules_for(cli: &Option<PathBuf>, dir: &Path) -> Rules {
-    let r = match cli {
-        Some(p) => std::fs::read_to_string(p)
-            .map_err(|e| e.to_string())
-            .and_then(|t| toml::from_str(&t).map_err(|e| e.to_string())),
-        None => Rules::load_dir(dir),
-    };
-    r.unwrap_or_else(|e| die(&e))
 }
 
 fn die(msg: &str) -> ! {
@@ -97,27 +97,65 @@ fn die(msg: &str) -> ! {
     std::process::exit(1)
 }
 
-fn parent(p: &Path) -> PathBuf {
-    p.parent().map(Path::to_path_buf).unwrap_or_else(|| ".".into())
+fn folder_rules(dir: &Path) -> Rules {
+    Rules::load_dir(dir).unwrap_or_else(|e| die(&e))
 }
 
-fn load_valid(p: &Path, rules: &Rules) -> Creature {
-    let c = Creature::load(p).unwrap_or_else(|e| die(&e));
-    if let Err(errs) = c.validate(rules) {
-        die(&format!("{} breaks the rules:\n  {}", p.display(), errs.join("\n  ")));
-    }
-    c
-}
-
-fn valid_creatures(dir: &Path, rules: &Rules) -> Vec<Creature> {
-    game::load_folder(dir, rules).into_iter().filter_map(|e| e.creature.ok()).collect()
+fn parse_genome(line: &str) -> Result<Vec<f64>, String> {
+    line.split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.parse::<f64>().map_err(|e| format!("'{t}': {e}")))
+        .collect()
 }
 
 fn main() {
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::Info { problem, json } => {
+            let p = problem.problem();
+            let info = p.info();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&info).expect("serialisable"));
+                return;
+            }
+            println!("creature  {}\nmode      {}\nbody      {}\ndim       {}", info.creature, info.mode, info.body, info.dim);
+            if p.mode == Mode::Sumo {
+                let ops = if info.opponents.is_empty() { "Rock".to_string() } else { info.opponents.join(", ") };
+                println!("opponents {ops}");
+            }
+            println!("\n  #  {:<22} {:>16}  {:>6}", "gene", "0 → 1 maps to", "start");
+            for (i, g) in info.genes.iter().enumerate() {
+                println!("{i:>3}  {:<22} [{:>6.2}, {:>6.2}]  {:>6.3}", g.name, g.lo, g.hi, g.start);
+            }
+        }
+        Cmd::Eval { problem, genes } => {
+            let p = problem.problem();
+            let g = genes.unwrap_or_else(|| p.start());
+            println!("{}", p.evaluate(&g).unwrap_or_else(|e| die(&e)));
+        }
+        Cmd::Batch { problem } => {
+            let p = problem.problem();
+            let mut pop = Vec::new();
+            for (n, line) in std::io::stdin().lock().lines().enumerate() {
+                let line = line.unwrap_or_else(|e| die(&e.to_string()));
+                if line.trim().is_empty() || line.trim_start().starts_with('#') {
+                    continue;
+                }
+                pop.push(parse_genome(&line).unwrap_or_else(|e| die(&format!("line {}: {e}", n + 1))));
+            }
+            let fit = p.evaluate_batch(&pop).unwrap_or_else(|e| die(&e));
+            let mut out = BufWriter::new(std::io::stdout().lock());
+            for f in fit {
+                writeln!(out, "{f}").ok();
+            }
+        }
+        Cmd::Save { problem, genes, out, name } => {
+            let p = problem.problem();
+            let f = p.save(&genes, &out, name.as_deref()).unwrap_or_else(|e| die(&e));
+            println!("fitness {f} -> {}", out.display());
+        }
         Cmd::Check { folder } => {
-            let rules = rules_for(&cli.rules, &folder);
+            let rules = folder_rules(&folder);
             let mut bad = 0;
             for e in game::load_folder(&folder, &rules) {
                 match &e.creature {
@@ -135,76 +173,16 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Cmd::Genes { creature, body } => {
-            let rules = rules_for(&cli.rules, &parent(&creature));
-            let c = load_valid(&creature, &rules);
-            let spec = GenomeSpec { body };
-            let values = spec.encode(&c, &rules);
-            for (g, v) in spec.genes(&c, &rules).iter().zip(values) {
-                println!("{:<24} [{:>7.2}, {:>7.2}]  now {:.4}", g.name, g.lo, g.hi, v);
-            }
-        }
-        Cmd::Eval { creature, mode, opponents, genes, body, out, name } => {
-            let rules = rules_for(&cli.rules, &parent(&creature));
-            let mut c = load_valid(&creature, &rules);
-            if let Some(g) = genes {
-                let spec = GenomeSpec { body };
-                let n = spec.genes(&c, &rules).len();
-                if g.len() != n {
-                    die(&format!("expected {n} genes, got {}", g.len()));
-                }
-                c = spec.decode(&c, &rules, &g);
-            }
-            let ops = opponents.map(|d| valid_creatures(&d, &rules)).unwrap_or_default();
-            let f = game::fitness(&c, mode, &rules, &ops);
-            if let Some(p) = out {
-                if let Some(n) = name {
-                    c.name = n;
-                }
-                c.save(&p).unwrap_or_else(|e| die(&e));
-            }
-            println!("{}", serde_json::json!({ "name": c.name, "mode": mode.name(), "fitness": f }));
-        }
-        Cmd::Train { template, mode, out, name, body, generations, population, sigma, seed, opponents } => {
-            let rules = rules_for(&cli.rules, &parent(&template));
-            let c = load_valid(&template, &rules);
-            let ops: Vec<Creature> = opponents
-                .map(|d| valid_creatures(&d, &rules))
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|o| o.name != c.name)
-                .collect();
-            let opts = TrainOptions {
-                mode,
-                generations,
-                spec: GenomeSpec { body },
-                ga: GaConfig { population, mutation_sigma: sigma, seed, ..Default::default() },
-            };
-            let dim = opts.spec.genes(&c, &rules).len();
-            println!("training '{}' for {} ({dim} genes, population {population})", c.name, mode.name());
-            let hist_path = out.with_extension("history.csv");
-            let mut hist = std::fs::File::create(&hist_path).unwrap_or_else(|e| die(&e.to_string()));
-            writeln!(hist, "generation,best,mean,best_ever,evaluations").ok();
-            let t0 = std::time::Instant::now();
-            let (best, f) = game::train(&c, &rules, &ops, &opts, |s| {
-                println!("gen {:>3}  best {:>8.3}  mean {:>8.3}  best ever {:>8.3}", s.generation, s.best, s.mean, s.best_ever);
-                writeln!(hist, "{},{},{},{},{}", s.generation, s.best, s.mean, s.best_ever, s.evaluations).ok();
-            });
-            let mut best = best;
-            best.name = name.unwrap_or_else(|| format!("{} ({})", c.name, mode.name()));
-            best.save(&out).unwrap_or_else(|e| die(&e));
-            println!("champion fitness {f:.3} -> {} ({:.1}s)", out.display(), t0.elapsed().as_secs_f64());
-        }
         Cmd::Race { folder } => {
-            let rules = rules_for(&cli.rules, &folder);
-            let cs = valid_creatures(&folder, &rules);
+            let rules = folder_rules(&folder);
+            let cs: Vec<_> = game::load_folder(&folder, &rules).into_iter().filter_map(|e| e.creature.ok()).collect();
             for (rank, (i, d)) in game::race_all(&cs, &rules).into_iter().enumerate() {
                 println!("{:>2}. {:<24} {:>7.2} m", rank + 1, cs[i].name, d);
             }
         }
         Cmd::Tournament { folder } => {
-            let rules = rules_for(&cli.rules, &folder);
-            let cs = valid_creatures(&folder, &rules);
+            let rules = folder_rules(&folder);
+            let cs: Vec<_> = game::load_folder(&folder, &rules).into_iter().filter_map(|e| e.creature.ok()).collect();
             let (table, _) = game::tournament(&cs, &rules);
             println!("    {:<24} {:>3} {:>3} {:>3} {:>4}", "", "W", "D", "L", "Pts");
             for (rank, s) in table.iter().enumerate() {

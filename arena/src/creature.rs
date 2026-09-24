@@ -61,7 +61,7 @@ pub struct Segment {
 pub struct Meta {
     pub trained_for: String,
     pub fitness: f64,
-    pub generations: usize,
+    /// Genomes evaluated by the GA that produced this creature.
     pub evaluations: usize,
 }
 
@@ -128,10 +128,11 @@ impl Rules {
     /// Load `arena.toml` from `dir` if present, otherwise defaults.
     pub fn load_dir(dir: &Path) -> Result<Self, String> {
         let p = dir.join("arena.toml");
-        if !p.exists() {
-            return Ok(Self::default());
-        }
-        let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        if p.exists() { Self::load_file(&p) } else { Ok(Self::default()) }
+    }
+
+    pub fn load_file(p: &Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
         toml::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))
     }
 }
@@ -292,7 +293,9 @@ impl GenomeSpec {
         let mut out = vec![c.brain.frequency, c.brain.coupling];
         for (i, s) in c.segments.iter().enumerate() {
             if i > 0 {
-                out.extend([s.amplitude, s.offset, s.phase]);
+                // Phase is periodic: wrap into the gene range instead of clamping.
+                let phase = (s.phase + 180.0).rem_euclid(360.0) - 180.0;
+                out.extend([s.amplitude, s.offset, phase]);
             }
             if self.body {
                 out.extend([s.length, s.width]);
