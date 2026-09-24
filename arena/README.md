@@ -72,7 +72,19 @@ phase = 90.0                # 这个关节的相位（度），关节之间的�
 | 适应度 fitness | 一个浮点数，**越大越好**；同一个基因组永远得到同样的结果（确定性） |
 | 起点 start | 你手写的那只生物对应的基因组，可以放进初始种群 |
 
-每个基因映射到什么物理量（频率、每个关节的幅度/偏移/相位；加 `body` 后还有各节尺寸和角度），可以用 `arena info` 查看。写 GA 并不需要知道这些，但调试时很有用。
+每个基因映射到什么物理量，可以用 `arena info` 查看。写 GA 并不需要知道这些，但调试时很有用。
+
+#### 优化什么：三个层级
+
+基因组控制的范围由 `level` 决定，层级越高，搜索空间越大：
+
+| level | 基因控制 | worm 基因数 |
+|---|---|---|
+| `brain`（默认） | CPG：频率、耦合强度、每个关节的幅度 / 偏移 / 相位。身体就是模板 | 14 |
+| `body` | 加上每一节的长、宽、挂接位置、静止角度。拓扑（几节、谁挂在谁上）仍是模板的 | 32 |
+| `structure` | 加上**拓扑**：`max_segments` 个槽位，每个槽位有"是否存在"和"挂在哪个父节上"两个基因。模板只是起点 | 67 |
+
+三个层级的基因组都是定长的 [0,1] 向量，所以同一个 GA 不用改就能在任何层级上跑。想用变长的、按结构操作的方式进化，见下面的"直接进化结构"。
 
 #### Python（[`python/arena.py`](python/arena.py)，只用标准库）
 
@@ -80,7 +92,7 @@ phase = 90.0                # 这个关节的相位（度），关节之间的�
 from arena import Problem
 
 p = Problem("creatures/worm.toml", mode="race")   # mode: "race" 或 "sumo"
-# 可选参数：body=True 连身体一起进化；opponents="班级文件夹" 相扑对手；rules="arena.toml"
+# 可选参数：level="brain" | "body" | "structure"；opponents="班级文件夹" 相扑对手；rules="arena.toml"
 
 p.dim                        # 基因个数
 p.start                      # 模板生物对应的基因组
@@ -105,7 +117,8 @@ p.save(best, "me.toml", name="我的冠军")   # 写成生物文件，返回适�
 
 ```bash
 python3 python/ga.py creatures/worm.toml --out creatures/me.toml --name "我的虫"
-python3 python/ga.py creatures/walker.toml --body --budget 2000 --out ...             # 连身体一起进化
+python3 python/ga.py creatures/walker.toml --level body --budget 2000 --out ...       # 连身体尺寸一起进化
+python3 python/ga.py creatures/worm.toml --level structure --budget 2000 --out ...    # 连拓扑一起进化
 python3 python/ga.py creatures/tailfin.toml --mode sumo --opponents 班级文件夹 --out ...
 # 其他参数：--population 50  --sigma 0.1（变异强度）  --seed 1  --rules 班级/arena.toml  --history h.csv（每代曲线）
 ```
@@ -137,13 +150,45 @@ arena eval  creatures/worm.toml --genes 0.3,0.5,...   # 单个基因组
 arena save  creatures/worm.toml --genes ... --out me.toml --name "我的冠军"
 ```
 
-四个命令都接受同样的问题参数：`--mode race|sumo`、`--body`、`--opponents <文件夹>`、`--rules <arena.toml>`。基因组长度不对或含 NaN 时，命令以非零状态退出并在 stderr 说明原因。
+四个命令都接受同样的问题参数：`--mode race|sumo`、`--level brain|body|structure`、`--opponents <文件夹>`、`--rules <arena.toml>`。基因组长度不对或含 NaN 时，命令以非零状态退出并在 stderr 说明原因。
+
+#### 直接进化结构（进阶）
+
+定长编码的 `structure` 层级很方便，但"加一条腿"在基因上可能要同时改好几个数。另一种做法是**直接对生物本身做变异**：个体就是一个生物（字典，字段和 `.toml` 文件一样），变异算子可以是"长出一节""剪掉一节叶子""把一条腿挪到别处"。这就是 Karl Sims 进化虚拟生物的思路。
+
+```python
+from arena import Judge, load_creature, save_creature
+
+j = Judge(mode="race")                          # 可选 opponents=..., rules=...
+worm = load_creature("creatures/worm.toml")     # dict: {"name":..., "brain": {...}, "segment": [{...}, ...]}
+j.rules                                         # 所有限制：max_segments、各参数范围、面积预算……
+j.evaluate([worm, other, ...])                  # 并行评估；违反规则的得 -inf
+j.errors                                        # 以及原因，例如 "creature 3: body area 0.71 m² exceeds budget 0.60 m²"
+save_creature(best, "me.toml")
+```
+
+[`python/evolve_structure.py`](python/evolve_structure.py) 是一个完整的例子：(μ+λ) 进化，带三个结构变异（`add_limb` / `remove_limb` / `reattach`）和一个参数变异（`nudge`），每个都可以改写。
+
+命令行：`arena judge [--mode] [--opponents] [--rules]` 从 stdin 每行读一个 JSON 生物，每行输出一个适应度；`arena rules` 打印规则（JSON）；`arena convert in.toml -` / `arena convert - out.toml` 在 TOML 和 JSON 之间转换。
+
+#### 参考数据
+
+worm / walker 赛跑，2000 次评估，默认参数：
+
+| 方法 | 从 worm 出发 | 从 walker 出发 |
+|---|---|---|
+| `ga.py --level brain` | 16.0 m | 11.9 m |
+| `ga.py --level body` | 21.9 m | 28.3 m |
+| `ga.py --level structure` | 17.7 m | 17.7 m |
+| `evolve_structure.py`（直接结构变异） | 24.4 m | 34.7 m |
+
+`structure` 层级两个起点结果完全一样：67 维时初始种群里 49 个随机个体淹没了唯一的模板个体，起点被"忘掉"了。
 
 #### Rust
 
 ```rust
-use cpg_arena::{game::Mode, problem::Problem};
-let p = Problem::load("creatures/worm.toml".as_ref(), Mode::Race, false, None, None)?;
+use cpg_arena::{creature::Level, game::Mode, problem::Problem};
+let p = Problem::load("creatures/worm.toml".as_ref(), Mode::Race, Level::Brain, None, None)?;
 let fit: Vec<f64> = p.evaluate_batch(&population)?;   // rayon 并行
 p.save(&best, "me.toml".as_ref(), Some("我的冠军"))?;
 ```
@@ -204,14 +249,14 @@ cargo run --release --example reference_ga -- creatures/worm.toml race 1000 out.
 arena/
 ├── src/
 │   ├── cpg.rs        # CPG 振荡器网络（RK4）
-│   ├── creature.rs   # 生物文件格式、规则、合规检查、基因编解码
+│   ├── creature.rs   # 生物文件格式、规则、合规检查、三个层级的基因编解码
 │   ├── sim.rs        # 2D 物理（rapier2d）：搭身体、驱动关节、赛道和相扑台
 │   ├── problem.rs    # 学生 GA 面对的黑盒接口：dim / start / evaluate_batch / save
 │   ├── game.rs       # 适应度、文件夹加载、循环赛
 │   └── bin/
-│       ├── arena.rs      # 命令行（info / eval / batch / save / check / race / tournament）
+│       ├── arena.rs      # 命令行（info / eval / batch / save / judge / rules / convert / check / race / tournament）
 │       └── arena-gui.rs  # 界面（eframe/egui）
-├── python/           # arena.py 接口、ga.py 默认 GA、my_ga.py 骨架、random_search.py 基线
+├── python/           # arena.py 接口、ga.py 默认 GA、my_ga.py 骨架、random_search.py 基线、evolve_structure.py 结构进化
 ├── examples/         # reference_ga.rs 参考答案（教师）
 └── creatures/        # 示例生物
 ```
@@ -221,7 +266,9 @@ arena/
 - 同样 1000 次评估，你的 GA 比随机搜索、比默认 GA 好多少？换几个随机种子，结论还成立吗？
 - 把默认 GA 的变异换成"不变异"、交叉换成"直接复制"：各自损失多少？哪个算子最重要？
 - 种群大小、变异强度怎么影响收敛速度和最终结果？探索和利用。
-- 只调 CPG 参数 vs 连身体一起进化（`body=True`）：搜索空间变大了多少，结果更好还是更差？
+- `brain` → `body` → `structure`：搜索空间越来越大，同样的评估次数下结果为什么不是越来越好？
+- 同样是进化结构，定长槽位编码（`--level structure`）和直接结构变异（`evolve_structure.py`）差很多：**表示方式**怎么影响进化？
+- `structure` 层级为什么"忘掉"了模板？怎样的初始种群能保住它（比如用模板的变异体填满初始种群）？
 - 为赛跑进化的生物，相扑为什么常常打不过（反之亦然）？专才和通才。
 - 相扑里经常出现"石头剪刀布"式的循环克制，没有绝对最强：这和协同进化有什么关系？如果拿对手的冠军来当训练对手呢？
 - GA 找到的"作弊"步态（比如翻个身滑行）：是 bug 还是创新？规则应该怎么改？

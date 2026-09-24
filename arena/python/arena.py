@@ -10,6 +10,18 @@
 
 Each `evaluate` call runs the whole population in parallel in one process,
 so call it once per generation rather than once per individual.
+
+To evolve structure with your own operators (add a leg, remove a segment,
+...), work on creatures directly instead of genomes:
+
+    from arena import Judge, load_creature, save_creature
+
+    j = Judge(mode="race")
+    worm = load_creature("creatures/worm.toml")   # a dict, same fields as the file
+    j.rules["max_segments"]                        # the limits a creature must respect
+    j.evaluate([worm, ...])                        # -> fitness list; rule breakers get -inf,
+    j.errors                                       #    and the reasons are here
+    save_creature(worm, "me.toml")
 """
 
 import json
@@ -18,7 +30,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-__all__ = ["Problem"]
+__all__ = ["Problem", "Judge", "load_creature", "save_creature"]
 
 
 def _find_binary():
@@ -40,16 +52,17 @@ class Problem:
 
     template:  creature file whose body plan is kept; genes fill in the numbers
     mode:      "race" (distance in metres) or "sumo" (win/loss + ring control)
-    body:      also let genes change segment sizes, attach points and angles
+    level:     what the genes control:
+               "brain"     CPG only (frequency, coupling, joint amplitude/offset/phase)
+               "body"      + each segment's length, width, attach point and angle
+               "structure" + how many segments and who attaches to whom
     opponents: sumo only, folder of creatures to fight (default: the Rock)
     rules:     rules file (default: arena.toml next to the template)
     """
 
-    def __init__(self, template, mode="race", body=False, opponents=None, rules=None):
+    def __init__(self, template, mode="race", level="brain", opponents=None, rules=None):
         self._bin = _find_binary()
-        self._args = [str(template), "--mode", mode]
-        if body:
-            self._args.append("--body")
+        self._args = [str(template), "--mode", mode, "--level", level]
         if opponents:
             self._args += ["--opponents", str(opponents)]
         if rules:
@@ -90,3 +103,49 @@ class Problem:
         for g, x in zip(self.info["genes"], genome):
             lines.append(f"{g['name']:<22} {g['lo'] + x * (g['hi'] - g['lo']):8.2f}")
         return "\n".join(lines)
+
+
+def _arena(*args, stdin=None):
+    res = subprocess.run([_find_binary(), *args], input=stdin, capture_output=True, text=True)
+    if res.returncode != 0:
+        raise ValueError(res.stderr.strip())
+    return res
+
+
+def load_creature(path):
+    """Read a creature file (.toml or .json) into a dict."""
+    return json.loads(_arena("convert", str(path), "-").stdout)
+
+
+def save_creature(creature, path):
+    """Write a creature dict to a .toml (or .json) file for the arena."""
+    _arena("convert", "-", str(path), stdin=json.dumps(creature))
+
+
+class Judge:
+    """Scores whole creatures (dicts) instead of genomes.
+
+    mode:      "race" or "sumo"
+    opponents: sumo only, folder of creatures to fight (default: the Rock)
+    rules:     rules file (default: built-in rules)
+    """
+
+    def __init__(self, mode="race", opponents=None, rules=None):
+        self._args = ["--mode", mode]
+        if opponents:
+            self._args += ["--opponents", str(opponents)]
+        self._rules_args = [str(rules)] if rules else []
+        if rules:
+            self._args += ["--rules", str(rules)]
+        self.rules = json.loads(_arena("rules", *self._rules_args).stdout)
+        self.errors = []
+        self.evaluations = 0
+
+    def evaluate(self, creatures):
+        """Fitness of each creature, evaluated in parallel. Creatures that break
+        the rules score -inf; `self.errors` lists why."""
+        text = "\n".join(json.dumps(c) for c in creatures)
+        res = _arena("judge", *self._args, stdin=text)
+        self.errors = [line for line in res.stderr.splitlines() if line.strip()]
+        self.evaluations += len(creatures)
+        return [float(x) for x in res.stdout.split()]

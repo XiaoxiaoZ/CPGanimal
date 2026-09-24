@@ -168,3 +168,16 @@ pub fn tournament(creatures: &[Creature], rules: &Rules) -> (Vec<Standing>, Vec<
     table.sort_by(|a, b| b.points.cmp(&a.points).then(b.wins.cmp(&a.wins)));
     (table, bouts)
 }
+
+/// Fitness of creatures given directly (not as genomes), in parallel.
+/// Creatures that break the rules get an `Err` with the reasons.
+pub fn judge(creatures: &[Creature], mode: Mode, rules: &Rules, opponents: &[Creature]) -> Vec<Result<f64, String>> {
+    creatures
+        .par_iter()
+        .map(|c| {
+            c.validate(rules).map_err(|e| e.join("; "))?;
+            let ops: Vec<Creature> = opponents.iter().filter(|o| o.name != c.name).cloned().collect();
+            Ok(fitness(c, mode, rules, &ops))
+        })
+        .collect()
+}

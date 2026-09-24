@@ -4,6 +4,7 @@
 //!
 //! cargo run --release --example reference_ga -- creatures/worm.toml [race|sumo] [budget] [out.toml]
 
+use cpg_arena::creature::Level;
 use cpg_arena::game::Mode;
 use cpg_arena::problem::Problem;
 use std::path::Path;
@@ -169,7 +170,7 @@ fn main() {
     let mode = if args.get(1).is_some_and(|m| m == "sumo") { Mode::Sumo } else { Mode::Race };
     let budget: usize = args.get(2).and_then(|b| b.parse().ok()).unwrap_or(1000);
     let opponents = (mode == Mode::Sumo).then(|| Path::new(template).parent().unwrap_or(Path::new(".")).to_path_buf());
-    let p = Problem::load(Path::new(template), mode, false, opponents.as_deref(), None).expect("problem");
+    let p = Problem::load(Path::new(template), mode, Level::Brain, opponents.as_deref(), None).expect("problem");
     let cfg = GaConfig { population: 50, ..Default::default() };
     let mut ga = Ga::new(p.dim(), cfg, &[p.start()]);
     while p.evaluations() < budget {

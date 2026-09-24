@@ -8,7 +8,7 @@
 //! The same interface is exposed on the command line (`arena info`,
 //! `arena batch`, `arena save`) so a GA can be written in any language.
 
-use crate::creature::{Creature, GenomeSpec, Meta, Rules};
+use crate::creature::{Creature, GenomeSpec, Level, Meta, Rules};
 use crate::game::{self, Mode};
 use rayon::prelude::*;
 use serde::Serialize;
@@ -39,7 +39,7 @@ pub struct GeneInfo {
 pub struct Info {
     pub creature: String,
     pub mode: &'static str,
-    pub body: bool,
+    pub level: Level,
     pub dim: usize,
     pub opponents: Vec<String>,
     pub genes: Vec<GeneInfo>,
@@ -48,18 +48,18 @@ pub struct Info {
 impl Problem {
     /// `opponents` only matters for sumo; with none, the creature fights the Rock.
     /// Opponents with the same name as the template are skipped (no fighting yourself).
-    pub fn new(template: Creature, rules: Rules, mode: Mode, body: bool, opponents: Vec<Creature>) -> Result<Self, String> {
+    pub fn new(template: Creature, rules: Rules, mode: Mode, level: Level, opponents: Vec<Creature>) -> Result<Self, String> {
         template
             .validate(&rules)
             .map_err(|e| format!("{} breaks the rules:\n  {}", template.name, e.join("\n  ")))?;
         let opponents = opponents.into_iter().filter(|o| o.name != template.name).collect();
-        Ok(Self { template, rules, mode, spec: GenomeSpec { body }, opponents, evaluations: AtomicUsize::new(0) })
+        Ok(Self { template, rules, mode, spec: GenomeSpec { level }, opponents, evaluations: AtomicUsize::new(0) })
     }
 
     /// Load the template from a file, the rules from `rules` (default:
     /// `arena.toml` next to the template, else built-in), and sumo opponents
     /// from every valid creature in `opponents_dir`.
-    pub fn load(template: &Path, mode: Mode, body: bool, opponents_dir: Option<&Path>, rules: Option<&Path>) -> Result<Self, String> {
+    pub fn load(template: &Path, mode: Mode, level: Level, opponents_dir: Option<&Path>, rules: Option<&Path>) -> Result<Self, String> {
         let rules = match rules {
             Some(p) => Rules::load_file(p)?,
             None => Rules::load_dir(template.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")))?,
@@ -68,7 +68,7 @@ impl Problem {
         let ops = opponents_dir
             .map(|d| game::load_folder(d, &rules).into_iter().filter_map(|e| e.creature.ok()).collect())
             .unwrap_or_default();
-        Self::new(c, rules, mode, body, ops)
+        Self::new(c, rules, mode, level, ops)
     }
 
     /// Number of genes.
@@ -93,7 +93,7 @@ impl Problem {
         Info {
             creature: self.template.name.clone(),
             mode: self.mode.name(),
-            body: self.spec.body,
+            level: self.spec.level,
             dim: self.dim(),
             opponents: self.opponents.iter().map(|o| o.name.clone()).collect(),
             genes,
@@ -155,7 +155,7 @@ mod tests {
 
     fn worm() -> Problem {
         let c: Creature = toml::from_str(include_str!("../creatures/worm.toml")).unwrap();
-        Problem::new(c, Rules::default(), Mode::Race, false, vec![]).unwrap()
+        Problem::new(c, Rules::default(), Mode::Race, Level::Brain, vec![]).unwrap()
     }
 
     #[test]

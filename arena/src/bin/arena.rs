@@ -10,7 +10,7 @@
 //! Plus `check`, `race` and `tournament` for folders of creatures.
 
 use clap::{Args, Parser, Subcommand};
-use cpg_arena::creature::Rules;
+use cpg_arena::creature::{Creature, Level, Rules};
 use cpg_arena::game::{self, Mode};
 use cpg_arena::problem::Problem;
 use std::io::{BufRead, BufWriter, Write};
@@ -26,13 +26,14 @@ struct Cli {
 /// What is being optimised. Same flags for info / eval / batch / save.
 #[derive(Args)]
 struct ProblemArgs {
-    /// Template creature: its body plan (topology) is fixed, the genes fill in the numbers.
+    /// Template creature: the starting point (and, below `structure`, the fixed body plan).
     template: PathBuf,
     #[arg(long, value_enum, default_value = "race")]
     mode: Mode,
-    /// Genes also control the body (segment sizes, attach points, angles).
-    #[arg(long)]
-    body: bool,
+    /// What the genes control: brain (CPG only), body (+ segment sizes and
+    /// angles), structure (+ number of segments and who attaches to whom).
+    #[arg(long, value_enum, default_value = "brain")]
+    level: Level,
     /// Sumo only: fight every creature in this folder (default: the Rock).
     #[arg(long)]
     opponents: Option<PathBuf>,
@@ -43,7 +44,7 @@ struct ProblemArgs {
 
 impl ProblemArgs {
     fn problem(&self) -> Problem {
-        Problem::load(&self.template, self.mode, self.body, self.opponents.as_deref(), self.rules.as_deref()).unwrap_or_else(|e| die(&e))
+        Problem::load(&self.template, self.mode, self.level, self.opponents.as_deref(), self.rules.as_deref()).unwrap_or_else(|e| die(&e))
     }
 }
 
@@ -84,6 +85,27 @@ enum Cmd {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Fitness of whole creatures instead of genomes, for evolving structure
+    /// with your own operators. Reads one creature per line from stdin as JSON
+    /// (same fields as the .toml files), writes one fitness per line; a
+    /// creature that breaks the rules scores -inf and the reason goes to stderr.
+    Judge {
+        #[arg(long, value_enum, default_value = "race")]
+        mode: Mode,
+        /// Sumo only: fight every creature in this folder (default: the Rock).
+        #[arg(long)]
+        opponents: Option<PathBuf>,
+        /// Rules file (default: built-in rules).
+        #[arg(long)]
+        rules: Option<PathBuf>,
+    },
+    /// Print the rules in effect as JSON (limits for segments, sizes, angles, …).
+    Rules {
+        /// Rules file (default: built-in rules).
+        rules: Option<PathBuf>,
+    },
+    /// Convert a creature between TOML and JSON. Use - for stdin/stdout (JSON).
+    Convert { input: String, output: String },
     /// Validate every creature in a folder.
     Check { folder: PathBuf },
     /// Race every creature in a folder.
@@ -95,6 +117,10 @@ enum Cmd {
 fn die(msg: &str) -> ! {
     eprintln!("error: {msg}");
     std::process::exit(1)
+}
+
+fn load_rules(file: Option<&Path>) -> Rules {
+    file.map_or_else(|| Ok(Rules::default()), Rules::load_file).unwrap_or_else(|e| die(&e))
 }
 
 fn folder_rules(dir: &Path) -> Rules {
@@ -118,7 +144,7 @@ fn main() {
                 println!("{}", serde_json::to_string_pretty(&info).expect("serialisable"));
                 return;
             }
-            println!("creature  {}\nmode      {}\nbody      {}\ndim       {}", info.creature, info.mode, info.body, info.dim);
+            println!("creature  {}\nmode      {}\nlevel     {}\ndim       {}", info.creature, info.mode, info.level.name(), info.dim);
             if p.mode == Mode::Sumo {
                 let ops = if info.opponents.is_empty() { "Rock".to_string() } else { info.opponents.join(", ") };
                 println!("opponents {ops}");
@@ -153,6 +179,71 @@ fn main() {
             let p = problem.problem();
             let f = p.save(&genes, &out, name.as_deref()).unwrap_or_else(|e| die(&e));
             println!("fitness {f} -> {}", out.display());
+        }
+        Cmd::Judge { mode, opponents, rules } => {
+            let rules = load_rules(rules.as_deref());
+            let ops: Vec<Creature> = opponents
+                .map(|d| game::load_folder(&d, &rules).into_iter().filter_map(|e| e.creature.ok()).collect())
+                .unwrap_or_default();
+            let mut cs = Vec::new();
+            let mut bad = Vec::new();
+            for line in std::io::stdin().lock().lines() {
+                let line = line.unwrap_or_else(|e| die(&e.to_string()));
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<Creature>(&line) {
+                    Ok(c) => cs.push(Some(c)),
+                    Err(e) => {
+                        bad.push(format!("creature {}: {e}", cs.len()));
+                        cs.push(None);
+                    }
+                }
+            }
+            let valid: Vec<Creature> = cs.iter().flatten().cloned().collect();
+            let mut results = game::judge(&valid, mode, &rules, &ops).into_iter();
+            let mut out = BufWriter::new(std::io::stdout().lock());
+            for (k, c) in cs.iter().enumerate() {
+                let r = match c {
+                    Some(_) => results.next().expect("one result per valid creature"),
+                    None => Err(String::new()),
+                };
+                match r {
+                    Ok(f) => writeln!(out, "{f}").ok(),
+                    Err(e) => {
+                        if !e.is_empty() {
+                            bad.push(format!("creature {k}: {e}"));
+                        }
+                        writeln!(out, "-inf").ok()
+                    }
+                };
+            }
+            bad.sort();
+            for b in bad {
+                eprintln!("{b}");
+            }
+        }
+        Cmd::Rules { rules } => {
+            println!("{}", serde_json::to_string_pretty(&load_rules(rules.as_deref())).expect("serialisable"));
+        }
+        Cmd::Convert { input, output } => {
+            let c: Creature = if input == "-" {
+                let mut text = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).unwrap_or_else(|e| die(&e.to_string()));
+                serde_json::from_str(&text).unwrap_or_else(|e| die(&e.to_string()))
+            } else if input.ends_with(".json") {
+                let text = std::fs::read_to_string(&input).unwrap_or_else(|e| die(&e.to_string()));
+                serde_json::from_str(&text).unwrap_or_else(|e| die(&e.to_string()))
+            } else {
+                Creature::load(Path::new(&input)).unwrap_or_else(|e| die(&e))
+            };
+            if output == "-" {
+                println!("{}", serde_json::to_string(&c).expect("serialisable"));
+            } else if output.ends_with(".json") {
+                std::fs::write(&output, serde_json::to_string_pretty(&c).expect("serialisable")).unwrap_or_else(|e| die(&e.to_string()));
+            } else {
+                c.save(Path::new(&output)).unwrap_or_else(|e| die(&e));
+            }
         }
         Cmd::Check { folder } => {
             let rules = folder_rules(&folder);

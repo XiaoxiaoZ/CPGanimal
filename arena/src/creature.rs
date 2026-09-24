@@ -199,12 +199,34 @@ impl Creature {
 }
 
 /// Which parts of a creature the genetic algorithm may change.
-/// The body *topology* (number of segments, who attaches to whom) is always
-/// the student's design; the GA tunes the numbers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Level {
+    /// CPG only: frequency, coupling, and each joint's amplitude / offset / phase.
+    /// The body is exactly the template.
+    #[default]
+    Brain,
+    /// Brain + each segment's length, width, attach point and rest angle.
+    /// The topology (how many segments, who attaches to whom) is the template's.
+    Body,
+    /// Everything, including the topology: `max_segments` slots, each with an
+    /// "exists" gene and a "parent" gene. The template is only the starting point.
+    Structure,
+}
+
+impl Level {
+    pub fn name(self) -> &'static str {
+        match self {
+            Level::Brain => "brain",
+            Level::Body => "body",
+            Level::Structure => "structure",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GenomeSpec {
-    /// Also evolve segment sizes, attach points and rest angles.
-    pub body: bool,
+    pub level: Level,
 }
 
 /// One gene: a named, bounded real value, stored in [0, 1].
@@ -215,25 +237,43 @@ pub struct Gene {
     pub hi: f64,
 }
 
+/// Structure genes that are not plain numbers: stored in [0, 1] and read as
+/// a switch (exists if > 0.5) or a choice (parent index).
+const SWITCH: [f64; 2] = [0.0, 1.0];
+/// Encoded value of a present / absent slot: away from the 0.5 threshold so
+/// small mutations rarely add or remove a segment.
+const PRESENT: f64 = 0.75;
+const ABSENT: f64 = 0.25;
+
+fn wrap_phase(p: f64) -> f64 {
+    (p + 180.0).rem_euclid(360.0) - 180.0
+}
+
 impl GenomeSpec {
     pub fn genes(&self, c: &Creature, r: &Rules) -> Vec<Gene> {
         let g = |name: String, b: [f64; 2]| Gene { name, lo: b[0], hi: b[1] };
-        let mut out = vec![
-            g("brain.frequency".into(), r.frequency),
-            g("brain.coupling".into(), r.coupling),
-        ];
-        for i in 0..c.segments.len() {
-            if i > 0 {
-                out.push(g(format!("segment[{i}].amplitude"), r.amplitude));
-                out.push(g(format!("segment[{i}].offset"), r.offset));
-                out.push(g(format!("segment[{i}].phase"), [-180.0, 180.0]));
+        let mut out = vec![g("brain.frequency".into(), r.frequency), g("brain.coupling".into(), r.coupling)];
+        let (slots, word) = match self.level {
+            Level::Structure => (r.max_segments, "slot"),
+            _ => (c.segments.len(), "segment"),
+        };
+        for i in 0..slots {
+            let n = |f: &str| format!("{word}[{i}].{f}");
+            if self.level == Level::Structure && i > 0 {
+                out.push(g(n("exists"), SWITCH));
+                out.push(g(n("parent"), SWITCH));
             }
-            if self.body {
-                out.push(g(format!("segment[{i}].length"), r.length));
-                out.push(g(format!("segment[{i}].width"), r.width));
+            if i > 0 {
+                out.push(g(n("amplitude"), r.amplitude));
+                out.push(g(n("offset"), r.offset));
+                out.push(g(n("phase"), [-180.0, 180.0]));
+            }
+            if self.level != Level::Brain {
+                out.push(g(n("length"), r.length));
+                out.push(g(n("width"), r.width));
                 if i > 0 {
-                    out.push(g(format!("segment[{i}].attach"), [-1.0, 1.0]));
-                    out.push(g(format!("segment[{i}].angle"), r.angle));
+                    out.push(g(n("attach"), [-1.0, 1.0]));
+                    out.push(g(n("angle"), r.angle));
                 }
             }
         }
@@ -243,61 +283,42 @@ impl GenomeSpec {
     /// Read the tunable values out of a creature, normalised to [0, 1].
     pub fn encode(&self, c: &Creature, r: &Rules) -> Vec<f64> {
         let genes = self.genes(c, r);
-        self.values(c)
+        self.values(c, r)
             .iter()
             .zip(&genes)
             .map(|(v, g)| ((v - g.lo) / (g.hi - g.lo)).clamp(0.0, 1.0))
             .collect()
     }
 
-    /// Write normalised genes into a copy of `template`. The result always
-    /// satisfies the rules (the body is shrunk to fit the area budget).
-    pub fn decode(&self, template: &Creature, r: &Rules, genome: &[f64]) -> Creature {
-        let genes = self.genes(template, r);
-        assert_eq!(genes.len(), genome.len(), "genome length does not match template");
-        let v: Vec<f64> = genes
-            .iter()
-            .zip(genome)
-            .map(|(g, x)| g.lo + x.clamp(0.0, 1.0) * (g.hi - g.lo))
-            .collect();
-        let mut c = template.clone();
-        let mut k = 0;
-        let mut next = || {
-            k += 1;
-            v[k - 1]
-        };
-        c.brain.frequency = next();
-        c.brain.coupling = next();
-        for i in 0..c.segments.len() {
-            let s = &mut c.segments[i];
-            if i > 0 {
-                s.amplitude = next();
-                s.offset = next();
-                s.phase = next();
-            }
-            if self.body {
-                s.length = next();
-                s.width = next();
-                if i > 0 {
-                    s.attach = next();
-                    s.angle = next();
-                }
-            }
-        }
-        fit_area(&mut c, r);
-        c.meta = None;
-        c
-    }
-
-    fn values(&self, c: &Creature) -> Vec<f64> {
+    /// Physical values in gene order. Structure switches are already in [0, 1].
+    fn values(&self, c: &Creature, r: &Rules) -> Vec<f64> {
         let mut out = vec![c.brain.frequency, c.brain.coupling];
-        for (i, s) in c.segments.iter().enumerate() {
-            if i > 0 {
-                // Phase is periodic: wrap into the gene range instead of clamping.
-                let phase = (s.phase + 180.0).rem_euclid(360.0) - 180.0;
-                out.extend([s.amplitude, s.offset, phase]);
+        let slots = if self.level == Level::Structure { r.max_segments } else { c.segments.len() };
+        // An absent slot gets middle-of-the-range values, so a segment that
+        // appears through mutation starts out reasonable.
+        let mid = |b: [f64; 2]| (b[0] + b[1]) / 2.0;
+        let spare = Segment {
+            parent: 0,
+            attach: 0.0,
+            angle: 0.0,
+            length: mid(r.length),
+            width: mid(r.width),
+            amplitude: mid(r.amplitude),
+            offset: 0.0,
+            phase: 0.0,
+        };
+        for i in 0..slots {
+            let present = i < c.segments.len();
+            let s = if present { &c.segments[i] } else { &spare };
+            if self.level == Level::Structure && i > 0 {
+                out.push(if present { PRESENT } else { ABSENT });
+                // Parent is chosen among the i earlier slots (all present in a template).
+                out.push(if present { (s.parent as f64 + 0.5) / i as f64 } else { 0.5 });
             }
-            if self.body {
+            if i > 0 {
+                out.extend([s.amplitude, s.offset, wrap_phase(s.phase)]);
+            }
+            if self.level != Level::Brain {
                 out.extend([s.length, s.width]);
                 if i > 0 {
                     out.extend([s.attach, s.angle]);
@@ -305,6 +326,71 @@ impl GenomeSpec {
             }
         }
         out
+    }
+
+    /// Build the creature for a genome. `template` supplies name, colour and
+    /// (below `Structure`) the topology. The result always satisfies the
+    /// rules: the body is shrunk to fit the area budget.
+    pub fn decode(&self, template: &Creature, r: &Rules, genome: &[f64]) -> Creature {
+        let genes = self.genes(template, r);
+        assert_eq!(genes.len(), genome.len(), "genome length does not match template");
+        let v: Vec<f64> = genes.iter().zip(genome).map(|(g, x)| g.lo + x.clamp(0.0, 1.0) * (g.hi - g.lo)).collect();
+        let mut k = 0;
+        let mut next = || {
+            k += 1;
+            v[k - 1]
+        };
+        let mut c = template.clone();
+        c.meta = None;
+        c.brain.frequency = next();
+        c.brain.coupling = next();
+        if self.level == Level::Structure {
+            c.segments.clear();
+            // slot index -> index in the decoded creature, for present slots
+            let mut placed: Vec<usize> = Vec::new();
+            for i in 0..r.max_segments {
+                let mut s = Segment::default();
+                let exists = i == 0 || next() > 0.5;
+                if i > 0 {
+                    let choice = next();
+                    // Parent among the slots placed so far (always includes slot 0).
+                    let p = ((choice * placed.len() as f64) as usize).min(placed.len() - 1);
+                    s.parent = p;
+                    s.amplitude = next();
+                    s.offset = next();
+                    s.phase = next();
+                }
+                s.length = next();
+                s.width = next();
+                if i > 0 {
+                    s.attach = next();
+                    s.angle = next();
+                }
+                if exists {
+                    placed.push(i);
+                    c.segments.push(s);
+                }
+            }
+        } else {
+            for i in 0..c.segments.len() {
+                let s = &mut c.segments[i];
+                if i > 0 {
+                    s.amplitude = next();
+                    s.offset = next();
+                    s.phase = next();
+                }
+                if self.level == Level::Body {
+                    s.length = next();
+                    s.width = next();
+                    if i > 0 {
+                        s.attach = next();
+                        s.angle = next();
+                    }
+                }
+            }
+        }
+        fit_area(&mut c, r);
+        c
     }
 }
 
@@ -351,25 +437,48 @@ mod tests {
     fn encode_decode_roundtrip() {
         let r = Rules::default();
         let c = worm();
-        for body in [false, true] {
-            let spec = GenomeSpec { body };
+        for level in [Level::Brain, Level::Body, Level::Structure] {
+            let spec = GenomeSpec { level };
             let g = spec.encode(&c, &r);
             assert_eq!(g.len(), spec.genes(&c, &r).len());
             let d = spec.decode(&c, &r, &g);
             assert!((d.segments[1].amplitude - 30.0).abs() < 1e-9);
             assert!((d.brain.frequency - 1.0).abs() < 1e-9);
+            assert_eq!(d.segments.len(), c.segments.len());
+            assert!(d.segments.iter().zip(&c.segments).skip(1).all(|(a, b)| a.parent == b.parent));
         }
     }
 
     #[test]
     fn decoded_creatures_are_always_legal() {
         let r = Rules::default();
-        let spec = GenomeSpec { body: true };
         let c = worm();
-        let n = spec.genes(&c, &r).len();
-        for fill in [0.0, 0.5, 1.0] {
-            let d = spec.decode(&c, &r, &vec![fill; n]);
-            d.validate(&r).unwrap();
+        for level in [Level::Body, Level::Structure] {
+            let spec = GenomeSpec { level };
+            let n = spec.genes(&c, &r).len();
+            for fill in [0.0, 0.3, 0.5, 0.51, 0.9, 1.0] {
+                let d = spec.decode(&c, &r, &vec![fill; n]);
+                d.validate(&r).unwrap();
+            }
         }
+    }
+
+    #[test]
+    fn structure_genes_change_topology() {
+        let r = Rules::default();
+        let c = worm();
+        let spec = GenomeSpec { level: Level::Structure };
+        let genes = spec.genes(&c, &r);
+        assert_eq!(spec.decode(&c, &r, &spec.encode(&c, &r)).segments.len(), 2);
+        // Switch every slot on: max_segments segments, parents always earlier.
+        let mut g = spec.encode(&c, &r);
+        for (x, gene) in g.iter_mut().zip(&genes) {
+            if gene.name.ends_with(".exists") {
+                *x = 1.0;
+            }
+        }
+        let d = spec.decode(&c, &r, &g);
+        assert_eq!(d.segments.len(), r.max_segments);
+        d.validate(&r).unwrap();
     }
 }

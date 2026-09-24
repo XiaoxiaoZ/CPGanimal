@@ -118,7 +118,8 @@ def main():
     ap.add_argument("--out", required=True, help="where to write the champion")
     ap.add_argument("--name", help="champion name shown in the arena")
     ap.add_argument("--mode", default="race", choices=["race", "sumo"])
-    ap.add_argument("--body", action="store_true", help="also evolve segment sizes, attach points and angles")
+    ap.add_argument("--level", default="brain", choices=["brain", "body", "structure"],
+                    help="brain: CPG only; body: + segment sizes and angles; structure: + number of segments and topology")
     ap.add_argument("--opponents", help="sumo: folder of creatures to fight (default: the Rock)")
     ap.add_argument("--rules", help="rules file, e.g. the class arena.toml")
     ap.add_argument("--budget", type=int, default=1000, help="total evaluations (default 1000)")
@@ -128,8 +129,8 @@ def main():
     ap.add_argument("--history", help="CSV file with best/mean fitness per generation")
     args = ap.parse_args()
 
-    problem = Problem(args.template, mode=args.mode, body=args.body, opponents=args.opponents, rules=args.rules)
-    print(f"{problem.info['creature']}: {problem.dim} genes, mode {args.mode}, budget {args.budget}")
+    problem = Problem(args.template, mode=args.mode, level=args.level, opponents=args.opponents, rules=args.rules)
+    print(f"{problem.info['creature']}: {problem.dim} genes, level {args.level}, mode {args.mode}, budget {args.budget}")
     best, fitness = run(problem, population=args.population, budget=args.budget, seed=args.seed,
                         mutate=lambda g: gaussian_mutation(g, sigma=args.sigma), history=args.history)
     problem.save(best, args.out, name=args.name)
