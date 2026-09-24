@@ -95,6 +95,12 @@ pub struct Rules {
     pub ring_width: f64,
     /// Start distance of each wrestler from the ring centre (m).
     pub sumo_start: f64,
+    /// Race track hill height (m). 0 = flat.
+    pub terrain_roughness: f64,
+    /// Which random terrain. A teacher can keep the competition seed secret.
+    pub terrain_seed: u64,
+    /// Race track slope (deg); positive is uphill for a creature going right.
+    pub slope: f64,
 }
 
 impl Default for Rules {
@@ -120,6 +126,9 @@ impl Default for Rules {
             sumo_time: 20.0,
             ring_width: 8.0,
             sumo_start: 1.8,
+            terrain_roughness: 0.0,
+            terrain_seed: 0,
+            slope: 0.0,
         }
     }
 }

@@ -5,11 +5,16 @@
 //! numbers mean (`genes()`) is there for curiosity and debugging; a GA does
 //! not need it.
 //!
+//! Two extras:
+//! - [`Environments`]: evaluate each genome on several terrains / frictions
+//!   and combine the scores, so evolution generalises instead of overfitting.
+//! - [`Problem::fight`]: sumo duels between two genomes, for co-evolution.
+//!
 //! The same interface is exposed on the command line (`arena info`,
-//! `arena batch`, `arena save`) so a GA can be written in any language.
+//! `arena batch`, `arena fight`, `arena save`) so a GA can be written in any language.
 
 use crate::creature::{Creature, GenomeSpec, Level, Meta, Rules};
-use crate::game::{self, Mode};
+use crate::game::{self, Environments, Mode};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::path::Path;
@@ -21,6 +26,8 @@ pub struct Problem {
     pub mode: Mode,
     pub spec: GenomeSpec,
     pub opponents: Vec<Creature>,
+    pub env: Environments,
+    variants: Vec<Rules>,
     evaluations: AtomicUsize,
 }
 
@@ -42,6 +49,7 @@ pub struct Info {
     pub level: Level,
     pub dim: usize,
     pub opponents: Vec<String>,
+    pub environments: Environments,
     pub genes: Vec<GeneInfo>,
 }
 
@@ -53,7 +61,16 @@ impl Problem {
             .validate(&rules)
             .map_err(|e| format!("{} breaks the rules:\n  {}", template.name, e.join("\n  ")))?;
         let opponents = opponents.into_iter().filter(|o| o.name != template.name).collect();
-        Ok(Self { template, rules, mode, spec: GenomeSpec { level }, opponents, evaluations: AtomicUsize::new(0) })
+        let env = Environments::default();
+        let variants = env.variants(&rules);
+        Ok(Self { template, rules, mode, spec: GenomeSpec { level }, opponents, env, variants, evaluations: AtomicUsize::new(0) })
+    }
+
+    /// Evaluate on these environments instead of the rules' single one.
+    pub fn with_environments(mut self, env: Environments) -> Self {
+        self.variants = env.variants(&self.rules);
+        self.env = env;
+        self
     }
 
     /// Load the template from a file, the rules from `rules` (default:
@@ -96,6 +113,7 @@ impl Problem {
             level: self.spec.level,
             dim: self.dim(),
             opponents: self.opponents.iter().map(|o| o.name.clone()).collect(),
+            environments: self.env.clone(),
             genes,
         }
     }
@@ -120,7 +138,29 @@ impl Problem {
     pub fn evaluate(&self, genome: &[f64]) -> Result<f64, String> {
         let c = self.decode(genome)?;
         self.evaluations.fetch_add(1, Ordering::Relaxed);
-        Ok(game::fitness(&c, self.mode, &self.rules, &self.opponents))
+        Ok(self.score(&c))
+    }
+
+    fn score(&self, c: &Creature) -> f64 {
+        game::fitness_in(c, self.mode, self.env.aggregate, &self.variants, &self.opponents)
+    }
+
+    /// Sumo duels for co-evolution: for each pair (a, b), the score of a
+    /// against b (+1 win / 0 draw / −1 loss, plus ring control). The score is
+    /// antisymmetric, so b's score is the negative: one bout rates both.
+    /// Each pair counts as one evaluation.
+    pub fn fight(&self, pairs: &[(Vec<f64>, Vec<f64>)]) -> Result<Vec<f64>, String> {
+        let decoded: Vec<(Creature, Creature)> = pairs
+            .iter()
+            .enumerate()
+            .map(|(k, (a, b))| {
+                let a = self.decode(a).map_err(|e| format!("pair {k}, first: {e}"))?;
+                let b = self.decode(b).map_err(|e| format!("pair {k}, second: {e}"))?;
+                Ok((a, b))
+            })
+            .collect::<Result<_, String>>()?;
+        self.evaluations.fetch_add(pairs.len(), Ordering::Relaxed);
+        Ok(decoded.par_iter().map(|(a, b)| game::duel(a, b, self.env.aggregate, &self.variants)).collect())
     }
 
     /// Fitness of a whole population, evaluated in parallel.
@@ -139,7 +179,7 @@ impl Problem {
     /// Write the creature for `genome` to `path`, ready for the arena.
     pub fn save(&self, genome: &[f64], path: &Path, name: Option<&str>) -> Result<f64, String> {
         let mut c = self.decode(genome)?;
-        let fitness = game::fitness(&c, self.mode, &self.rules, &self.opponents);
+        let fitness = self.score(&c);
         if let Some(n) = name {
             c.name = n.to_string();
         }
@@ -173,6 +213,30 @@ mod tests {
         let b: Vec<f64> = pop.iter().map(|g| p.evaluate(g).unwrap()).collect();
         assert_eq!(a, b);
         assert_eq!(p.evaluations(), 12);
+    }
+
+    #[test]
+    fn environments_vary_terrain_and_one_trial_is_the_rules() {
+        let c: Creature = toml::from_str(include_str!("../creatures/worm.toml")).unwrap();
+        let rules = Rules { terrain_roughness: 0.3, ..Rules::default() };
+        let one = Problem::new(c.clone(), rules.clone(), Mode::Race, Level::Brain, vec![]).unwrap();
+        let direct = game::fitness(&c, Mode::Race, &rules, &[]);
+        assert_eq!(one.evaluate(&one.start()).unwrap(), direct);
+        let env = Environments { trials: 3, first_seed: Some(100), ..Default::default() };
+        let many = Problem::new(c, rules, Mode::Race, Level::Brain, vec![]).unwrap().with_environments(env);
+        let seeds: Vec<u64> = many.variants.iter().map(|r| r.terrain_seed).collect();
+        assert_eq!(seeds, vec![100, 101, 102]);
+        assert!(many.evaluate(&many.start()).unwrap().is_finite());
+    }
+
+    #[test]
+    fn fight_is_roughly_antisymmetric() {
+        let c: Creature = toml::from_str(include_str!("../creatures/tailfin.toml")).unwrap();
+        let p = Problem::new(c, Rules::default(), Mode::Sumo, Level::Brain, vec![]).unwrap();
+        let a = p.start();
+        let b = vec![0.8; p.dim()];
+        let s = p.fight(&[(a.clone(), b.clone()), (b, a)]).unwrap();
+        assert!(s[0] * s[1] <= 0.0, "one side should not beat the other from both sides: {s:?}");
     }
 
     #[test]

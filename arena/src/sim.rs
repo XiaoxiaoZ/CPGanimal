@@ -48,6 +48,8 @@ pub struct Arena {
     pub time: f64,
     /// Static ground boxes (center, half extents) for drawing.
     pub ground: Vec<([f32; 2], [f32; 2])>,
+    /// Race terrain surface (x, y) for drawing; empty when flat.
+    pub terrain: Vec<[f32; 2]>,
 }
 
 #[derive(Clone, Debug)]
@@ -65,7 +67,7 @@ impl Arena {
     fn empty(stage: Stage, rules: &Rules) -> Self {
         let mut world = PhysicsWorld::new();
         world.integration_parameters.dt = rules.dt as f32;
-        Self { world, fighters: Vec::new(), stage, rules: rules.clone(), time: 0.0, ground: Vec::new() }
+        Self { world, fighters: Vec::new(), stage, rules: rules.clone(), time: 0.0, ground: Vec::new(), terrain: Vec::new() }
     }
 
     fn add_ground(&mut self, center: [f32; 2], half: [f32; 2]) {
@@ -79,9 +81,32 @@ impl Arena {
 
     pub fn race(c: &Creature, rules: &Rules) -> Self {
         let mut a = Self::empty(Stage::Race, rules);
+        // Slope: tilt gravity instead of the ground (x stays "along the track").
+        let s = rules.slope.to_radians() as f32;
+        a.world.gravity = Vec2::new(-9.81 * s.sin(), -9.81 * s.cos());
         a.add_ground([0.0, -0.5], [5000.0, 0.5]);
+        if rules.terrain_roughness > 0.0 {
+            a.add_terrain(rules.terrain_roughness, rules.terrain_seed);
+        }
         a.spawn(c, 0, 0.0, false);
         a
+    }
+
+    /// Smooth random hills from x = 1 m on (the start area stays flat).
+    /// Heights are ≥ 0, so the flat ground box underneath never pokes out.
+    fn add_terrain(&mut self, roughness: f64, seed: u64) {
+        const X0: f64 = -20.0;
+        const X1: f64 = 300.0;
+        const STEP: f64 = 0.1;
+        let n = ((X1 - X0) / STEP) as usize + 1;
+        let heights: Vec<f32> =
+            (0..n).map(|i| terrain_height(X0 + i as f64 * STEP, roughness, seed) as f32).collect();
+        let body = self.world.bodies.insert(RigidBodyBuilder::fixed().translation(Vec2::new(((X0 + X1) / 2.0) as f32, 0.0)));
+        let col = ColliderBuilder::heightfield(heights.clone(), Vec2::new((X1 - X0) as f32, 1.0))
+            .friction(self.rules.friction as f32)
+            .collision_groups(InteractionGroups::new(GROUND, Group::ALL, InteractionTestMode::And));
+        self.world.colliders.insert_with_parent(col, body, &mut self.world.bodies);
+        self.terrain = heights.iter().enumerate().map(|(i, &h)| [(X0 + i as f64 * STEP) as f32, h]).collect();
     }
 
     pub fn sumo(c0: &Creature, c1: &Creature, rules: &Rules) -> Self {
@@ -286,6 +311,29 @@ impl Arena {
         };
         Some(res(winner, "time up, ring control", margin))
     }
+}
+
+/// Deterministic pseudo-random number in [0, 1) from an integer and a seed.
+pub fn hash01(i: i64, seed: u64) -> f64 {
+    let mut z = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ seed.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// Terrain height at `x`: two octaves of smooth value noise, faded in over
+/// x ∈ [1, 3] m so every creature starts on flat ground.
+pub fn terrain_height(x: f64, roughness: f64, seed: u64) -> f64 {
+    fn noise(x: f64, seed: u64) -> f64 {
+        let i = x.floor();
+        let t = x - i;
+        let t = t * t * (3.0 - 2.0 * t);
+        let (a, b) = (hash01(i as i64, seed), hash01(i as i64 + 1, seed));
+        a + (b - a) * t
+    }
+    let fade = ((x - 1.0) / 2.0).clamp(0.0, 1.0);
+    let h = 0.7 * noise(x / 1.2, seed) + 0.3 * noise(x / 0.35, seed ^ 0xA5A5);
+    roughness * fade * h
 }
 
 /// Headless race: metres travelled to the right.

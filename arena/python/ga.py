@@ -123,13 +123,19 @@ def main():
     ap.add_argument("--opponents", help="sumo: folder of creatures to fight (default: the Rock)")
     ap.add_argument("--rules", help="rules file, e.g. the class arena.toml")
     ap.add_argument("--budget", type=int, default=1000, help="total evaluations (default 1000)")
+    ap.add_argument("--trials", type=int, default=1, help="environments per evaluation (terrain seeds)")
+    ap.add_argument("--env-seed", type=int, help="terrain seed of the first environment")
+    ap.add_argument("--friction-jitter", type=float, default=0.0, help="random friction scale +-j per environment")
+    ap.add_argument("--aggregate", default="mean", choices=["mean", "min"], help="combine environments by mean or worst case")
     ap.add_argument("--population", type=int, default=50)
     ap.add_argument("--sigma", type=float, default=0.1, help="mutation strength")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--history", help="CSV file with best/mean fitness per generation")
     args = ap.parse_args()
 
-    problem = Problem(args.template, mode=args.mode, level=args.level, opponents=args.opponents, rules=args.rules)
+    problem = Problem(args.template, mode=args.mode, level=args.level, opponents=args.opponents, rules=args.rules,
+                      trials=args.trials, env_seed=args.env_seed, friction_jitter=args.friction_jitter,
+                      aggregate=args.aggregate)
     print(f"{problem.info['creature']}: {problem.dim} genes, level {args.level}, mode {args.mode}, budget {args.budget}")
     best, fitness = run(problem, population=args.population, budget=args.budget, seed=args.seed,
                         mutate=lambda g: gaussian_mutation(g, sigma=args.sigma), history=args.history)

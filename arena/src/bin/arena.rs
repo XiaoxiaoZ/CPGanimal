@@ -5,13 +5,14 @@
 //! arena batch worm.toml < pop.txt       one genome per line in, one fitness per line out
 //! arena eval  worm.toml --genes 0.1,…   fitness of one genome
 //! arena save  worm.toml --genes 0.1,… --out me.toml --name "Me"
+//! arena fight tailfin.toml < pairs.txt  "genesA | genesB" per line in, score of A per line out
 //! ```
 //!
 //! Plus `check`, `race` and `tournament` for folders of creatures.
 
 use clap::{Args, Parser, Subcommand};
 use cpg_arena::creature::{Creature, Level, Rules};
-use cpg_arena::game::{self, Mode};
+use cpg_arena::game::{self, Aggregate, Environments, Mode};
 use cpg_arena::problem::Problem;
 use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -40,11 +41,39 @@ struct ProblemArgs {
     /// Rules file (default: arena.toml next to the template, else built-in rules).
     #[arg(long)]
     rules: Option<PathBuf>,
+    #[command(flatten)]
+    env: EnvArgs,
 }
 
 impl ProblemArgs {
     fn problem(&self) -> Problem {
-        Problem::load(&self.template, self.mode, self.level, self.opponents.as_deref(), self.rules.as_deref()).unwrap_or_else(|e| die(&e))
+        Problem::load(&self.template, self.mode, self.level, self.opponents.as_deref(), self.rules.as_deref())
+            .unwrap_or_else(|e| die(&e))
+            .with_environments(self.env.environments())
+    }
+}
+
+/// Evaluate on several environments (terrain seeds / frictions) and combine.
+#[derive(Args)]
+struct EnvArgs {
+    /// Number of environments per evaluation (1 = exactly the rules).
+    #[arg(long, default_value_t = 1)]
+    trials: usize,
+    /// Terrain seed of the first environment; trial k uses seed + k
+    /// (default: terrain_seed from the rules).
+    #[arg(long)]
+    env_seed: Option<u64>,
+    /// Scale friction by a random factor in [1-j, 1+j] per environment.
+    #[arg(long, default_value_t = 0.0)]
+    friction_jitter: f64,
+    /// Combine per-environment scores by mean or worst case.
+    #[arg(long, value_enum, default_value = "mean")]
+    aggregate: Aggregate,
+}
+
+impl EnvArgs {
+    fn environments(&self) -> Environments {
+        Environments { trials: self.trials, first_seed: self.env_seed, friction_jitter: self.friction_jitter, aggregate: self.aggregate }
     }
 }
 
@@ -73,6 +102,13 @@ enum Cmd {
         #[command(flatten)]
         problem: ProblemArgs,
     },
+    /// Sumo duels between genomes, for co-evolution. Reads one pair per line
+    /// from stdin, "genesA | genesB"; writes the score of A against B per line
+    /// (+1 win / 0 draw / -1 loss, plus ring control; B's score is the negative).
+    Fight {
+        #[command(flatten)]
+        problem: ProblemArgs,
+    },
     /// Turn a genome into a creature file for the arena.
     Save {
         #[command(flatten)]
@@ -92,6 +128,12 @@ enum Cmd {
     Judge {
         #[arg(long, value_enum, default_value = "race")]
         mode: Mode,
+        /// Sumo duels instead: each line is a JSON array [creatureA, creatureB]
+        /// and the output is A's score against B.
+        #[arg(long)]
+        pairs: bool,
+        #[command(flatten)]
+        env: EnvArgs,
         /// Sumo only: fight every creature in this folder (default: the Rock).
         #[arg(long)]
         opponents: Option<PathBuf>,
@@ -145,6 +187,11 @@ fn main() {
                 return;
             }
             println!("creature  {}\nmode      {}\nlevel     {}\ndim       {}", info.creature, info.mode, info.level.name(), info.dim);
+            let e = &info.environments;
+            if e.trials > 1 || e.friction_jitter > 0.0 {
+                let seed = e.first_seed.unwrap_or(p.rules.terrain_seed);
+                println!("envs      {} trials, terrain seeds {}..{}, friction ±{:.0}%, {:?}", e.trials, seed, seed + e.trials as u64 - 1, e.friction_jitter * 100.0, e.aggregate);
+            }
             if p.mode == Mode::Sumo {
                 let ops = if info.opponents.is_empty() { "Rock".to_string() } else { info.opponents.join(", ") };
                 println!("opponents {ops}");
@@ -175,52 +222,72 @@ fn main() {
                 writeln!(out, "{f}").ok();
             }
         }
+        Cmd::Fight { problem } => {
+            let p = problem.problem();
+            let mut pairs = Vec::new();
+            for (n, line) in std::io::stdin().lock().lines().enumerate() {
+                let line = line.unwrap_or_else(|e| die(&e.to_string()));
+                if line.trim().is_empty() || line.trim_start().starts_with('#') {
+                    continue;
+                }
+                let (a, b) = line.split_once('|').unwrap_or_else(|| die(&format!("line {}: expected \"genesA | genesB\"", n + 1)));
+                let parse = |t: &str| parse_genome(t).unwrap_or_else(|e| die(&format!("line {}: {e}", n + 1)));
+                pairs.push((parse(a), parse(b)));
+            }
+            let scores = p.fight(&pairs).unwrap_or_else(|e| die(&e));
+            let mut out = BufWriter::new(std::io::stdout().lock());
+            for f in scores {
+                writeln!(out, "{f}").ok();
+            }
+        }
         Cmd::Save { problem, genes, out, name } => {
             let p = problem.problem();
             let f = p.save(&genes, &out, name.as_deref()).unwrap_or_else(|e| die(&e));
             println!("fitness {f} -> {}", out.display());
         }
-        Cmd::Judge { mode, opponents, rules } => {
+        Cmd::Judge { mode, pairs, env, opponents, rules } => {
             let rules = load_rules(rules.as_deref());
-            let ops: Vec<Creature> = opponents
-                .map(|d| game::load_folder(&d, &rules).into_iter().filter_map(|e| e.creature.ok()).collect())
-                .unwrap_or_default();
-            let mut cs = Vec::new();
-            let mut bad = Vec::new();
+            let env = env.environments();
+            // Parse every line; unparsable lines score -inf.
+            let mut parsed: Vec<Result<Vec<Creature>, String>> = Vec::new();
             for line in std::io::stdin().lock().lines() {
                 let line = line.unwrap_or_else(|e| die(&e.to_string()));
                 if line.trim().is_empty() {
                     continue;
                 }
-                match serde_json::from_str::<Creature>(&line) {
-                    Ok(c) => cs.push(Some(c)),
-                    Err(e) => {
-                        bad.push(format!("creature {}: {e}", cs.len()));
-                        cs.push(None);
-                    }
-                }
+                let item = if pairs {
+                    serde_json::from_str::<[Creature; 2]>(&line).map(Vec::from)
+                } else {
+                    serde_json::from_str::<Creature>(&line).map(|c| vec![c])
+                };
+                parsed.push(item.map_err(|e| e.to_string()));
             }
-            let valid: Vec<Creature> = cs.iter().flatten().cloned().collect();
-            let mut results = game::judge(&valid, mode, &rules, &ops).into_iter();
+            let ok: Vec<Vec<Creature>> = parsed.iter().filter_map(|p| p.as_ref().ok().cloned()).collect();
+            let results = if pairs {
+                let ps: Vec<(Creature, Creature)> = ok.into_iter().map(|v| (v[0].clone(), v[1].clone())).collect();
+                game::judge_pairs(&ps, &env, &rules)
+            } else {
+                let ops: Vec<Creature> = opponents
+                    .map(|d| game::load_folder(&d, &rules).into_iter().filter_map(|e| e.creature.ok()).collect())
+                    .unwrap_or_default();
+                let cs: Vec<Creature> = ok.into_iter().map(|mut v| v.remove(0)).collect();
+                game::judge(&cs, mode, &env, &rules, &ops)
+            };
+            let mut results = results.into_iter();
             let mut out = BufWriter::new(std::io::stdout().lock());
-            for (k, c) in cs.iter().enumerate() {
-                let r = match c {
-                    Some(_) => results.next().expect("one result per valid creature"),
-                    None => Err(String::new()),
+            let what = if pairs { "pair" } else { "creature" };
+            for (k, p) in parsed.iter().enumerate() {
+                let r = match p {
+                    Ok(_) => results.next().expect("one result per parsed line"),
+                    Err(e) => Err(e.clone()),
                 };
                 match r {
                     Ok(f) => writeln!(out, "{f}").ok(),
                     Err(e) => {
-                        if !e.is_empty() {
-                            bad.push(format!("creature {k}: {e}"));
-                        }
+                        eprintln!("{what} {k}: {e}");
                         writeln!(out, "-inf").ok()
                     }
                 };
-            }
-            bad.sort();
-            for b in bad {
-                eprintln!("{b}");
             }
         }
         Cmd::Rules { rules } => {

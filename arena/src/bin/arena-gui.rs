@@ -530,6 +530,16 @@ impl App {
                     painter.text(Pos2::new(x, ground_y + 6.0), Align2::CENTER_TOP, format!("{m} m"), FontId::proportional(10.0), Color32::from_gray(170));
                 }
             }
+            // Hills: filled columns between the ground line and the terrain surface.
+            let hill = Color32::from_rgb(110, 90, 65);
+            let visible: Vec<&[f32; 2]> = r.arena.terrain.iter().filter(|p| p[0] >= x0 - 0.2 && p[0] <= x1 + 0.2).collect();
+            for w in visible.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                if a[1] > 1e-3 || b[1] > 1e-3 {
+                    let pts = vec![to_screen([a[0], 0.0]), to_screen(*a), to_screen(*b), to_screen([b[0], 0.0])];
+                    painter.add(Shape::convex_polygon(pts, hill, Stroke::new(1.0, hill)));
+                }
+            }
             let start = to_screen([0.0, 0.0]);
             painter.line_segment([Pos2::new(start.x, top + 4.0), Pos2::new(start.x, ground_y)], Stroke::new(1.0, Color32::from_white_alpha(40)));
             draw_creatures(painter, &r.arena, &[r.color], &to_screen, scale, 255);
@@ -537,7 +547,11 @@ impl App {
             painter.text(Pos2::new(rect.left() + 10.0, top + 6.0), Align2::LEFT_TOP, format!("{}  {:.2} m", self.creature(r.entry).name, d), FontId::proportional(14.0), r.color);
         }
         let t = self.race.iter().map(|r| r.arena.time).fold(0.0, f64::max);
-        painter.text(rect.right_top() + Vec2::new(-12.0, 6.0), Align2::RIGHT_TOP, format!("t = {t:.1} / {:.0} s", self.rules.race_time), FontId::proportional(18.0), Color32::WHITE);
+        let mut hud = format!("t = {t:.1} / {:.0} s", self.rules.race_time);
+        if self.rules.slope != 0.0 {
+            hud += &format!("   slope {:+.0}° ({})", self.rules.slope, if self.rules.slope > 0.0 { "uphill" } else { "downhill" });
+        }
+        painter.text(rect.right_top() + Vec2::new(-12.0, 6.0), Align2::RIGHT_TOP, hud, FontId::proportional(18.0), Color32::WHITE);
     }
 
     fn draw_sumo(&mut self, painter: &egui::Painter, rect: Rect) {

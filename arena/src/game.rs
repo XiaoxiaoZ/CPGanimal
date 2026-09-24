@@ -59,6 +59,75 @@ pub fn fitness(c: &Creature, mode: Mode, rules: &Rules, opponents: &[Creature]) 
     }
 }
 
+/// How per-environment scores are combined.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Aggregate {
+    /// Average: good on typical terrain.
+    #[default]
+    Mean,
+    /// Worst case: good on every terrain.
+    Min,
+}
+
+/// The environments a creature is tested in. One trial (the default) is
+/// exactly the rules; more trials vary the terrain seed (and optionally the
+/// friction) so that evolution cannot overfit a single track.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Environments {
+    pub trials: usize,
+    /// Terrain seed of the first trial (default: the rules' `terrain_seed`).
+    /// Trial k uses seed `first_seed + k`. Use disjoint seeds to test a
+    /// creature on tracks it was not trained on.
+    pub first_seed: Option<u64>,
+    /// Friction is scaled by a random factor in [1 − j, 1 + j] per trial.
+    pub friction_jitter: f64,
+    pub aggregate: Aggregate,
+}
+
+impl Default for Environments {
+    fn default() -> Self {
+        Self { trials: 1, first_seed: None, friction_jitter: 0.0, aggregate: Aggregate::Mean }
+    }
+}
+
+impl Environments {
+    /// One set of rules per trial.
+    pub fn variants(&self, rules: &Rules) -> Vec<Rules> {
+        let base = self.first_seed.unwrap_or(rules.terrain_seed);
+        (0..self.trials.max(1) as u64)
+            .map(|k| {
+                let mut r = rules.clone();
+                r.terrain_seed = base + k;
+                if self.friction_jitter > 0.0 {
+                    let u = crate::sim::hash01(r.terrain_seed as i64, 0x5EED) * 2.0 - 1.0;
+                    r.friction = (rules.friction * (1.0 + self.friction_jitter * u)).max(0.05);
+                }
+                r
+            })
+            .collect()
+    }
+
+    fn combine(agg: Aggregate, scores: impl Iterator<Item = f64>) -> f64 {
+        let v: Vec<f64> = scores.collect();
+        match agg {
+            Aggregate::Mean => v.iter().sum::<f64>() / v.len().max(1) as f64,
+            Aggregate::Min => v.iter().copied().fold(f64::INFINITY, f64::min),
+        }
+    }
+}
+
+/// Fitness over several environments (see [`Environments::variants`]).
+pub fn fitness_in(c: &Creature, mode: Mode, agg: Aggregate, variants: &[Rules], opponents: &[Creature]) -> f64 {
+    Environments::combine(agg, variants.iter().map(|r| fitness(c, mode, r, opponents)))
+}
+
+/// Sumo score of `a` against `b` over several environments. Antisymmetric:
+/// `b`'s score is (up to physics noise) the negative.
+pub fn duel(a: &Creature, b: &Creature, agg: Aggregate, variants: &[Rules]) -> f64 {
+    Environments::combine(agg, variants.iter().map(|r| sumo_score(a, b, r)))
+}
+
 /// One file in the creatures folder.
 #[derive(Clone, Debug)]
 pub struct Entry {
@@ -171,13 +240,27 @@ pub fn tournament(creatures: &[Creature], rules: &Rules) -> (Vec<Standing>, Vec<
 
 /// Fitness of creatures given directly (not as genomes), in parallel.
 /// Creatures that break the rules get an `Err` with the reasons.
-pub fn judge(creatures: &[Creature], mode: Mode, rules: &Rules, opponents: &[Creature]) -> Vec<Result<f64, String>> {
+pub fn judge(creatures: &[Creature], mode: Mode, env: &Environments, rules: &Rules, opponents: &[Creature]) -> Vec<Result<f64, String>> {
+    let variants = env.variants(rules);
     creatures
         .par_iter()
         .map(|c| {
             c.validate(rules).map_err(|e| e.join("; "))?;
             let ops: Vec<Creature> = opponents.iter().filter(|o| o.name != c.name).cloned().collect();
-            Ok(fitness(c, mode, rules, &ops))
+            Ok(fitness_in(c, mode, env.aggregate, &variants, &ops))
+        })
+        .collect()
+}
+
+/// Sumo duels between given creatures: score of the first against the second.
+pub fn judge_pairs(pairs: &[(Creature, Creature)], env: &Environments, rules: &Rules) -> Vec<Result<f64, String>> {
+    let variants = env.variants(rules);
+    pairs
+        .par_iter()
+        .map(|(a, b)| {
+            a.validate(rules).map_err(|e| format!("first: {}", e.join("; ")))?;
+            b.validate(rules).map_err(|e| format!("second: {}", e.join("; ")))?;
+            Ok(duel(a, b, env.aggregate, &variants))
         })
         .collect()
 }

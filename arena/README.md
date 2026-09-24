@@ -148,9 +148,10 @@ arena batch creatures/worm.toml < pop.txt         # stdin 每行一个基因组�
                                                   # stdout 每行一个适应度，顺序相同，整批并行
 arena eval  creatures/worm.toml --genes 0.3,0.5,...   # 单个基因组
 arena save  creatures/worm.toml --genes ... --out me.toml --name "我的冠军"
+arena fight creatures/tailfin.toml < pairs.txt    # 每行 "基因组A | 基因组B"，输出 A 对 B 的相扑得分
 ```
 
-四个命令都接受同样的问题参数：`--mode race|sumo`、`--level brain|body|structure`、`--opponents <文件夹>`、`--rules <arena.toml>`。基因组长度不对或含 NaN 时，命令以非零状态退出并在 stderr 说明原因。
+这些命令都接受同样的问题参数：`--mode race|sumo`、`--level brain|body|structure`、`--opponents <文件夹>`、`--rules <arena.toml>`，以及环境参数 `--trials`、`--env-seed`、`--friction-jitter`、`--aggregate`（见"泛化"）。基因组长度不对或含 NaN 时，命令以非零状态退出并在 stderr 说明原因。
 
 #### 直接进化结构（进阶）
 
@@ -183,6 +184,74 @@ worm / walker 赛跑，2000 次评估，默认参数：
 | `evolve_structure.py`（直接结构变异） | 24.4 m | 34.7 m |
 
 `structure` 层级两个起点结果完全一样：67 维时初始种群里 49 个随机个体淹没了唯一的模板个体，起点被"忘掉"了。
+
+#### 协同进化：和同一种群里的个体打（相扑）
+
+对着固定对手（石头、同学的旧文件）训练，只能学会打败那几个。**协同进化**让对手来自种群本身：你变强，对手也在变强，形成军备竞赛。
+
+```python
+p = Problem("creatures/tailfin.toml", mode="sumo")
+scores = p.fight([(a, b), (c, d), ...])   # 每对 (基因组A, 基因组B) → A 对 B 的得分
+# 得分是反对称的：B 的得分就是 -score，所以一场比赛同时给双方打分
+j.fight([(creature_a, creature_b), ...])  # Judge 版本，直接用生物字典
+```
+
+[`python/coevolve.py`](python/coevolve.py) 是完整例子，处理了协同进化的两个经典问题：
+
+- **循环克制**（A 胜 B、B 胜 C、C 胜 A，种群原地打转）：维护一个**名人堂**（过去每代的冠军），一半比赛对名人堂打，新个体必须同时能打败"老套路"。
+- **没有绝对的进步信号**：种群内的适应度是相对的，大家一起变强时"最好适应度"可能不动。所以每 5 代让冠军对一个**固定基准**（`--benchmark 文件夹`）打一次，看真实进步。
+
+```bash
+python3 python/coevolve.py creatures/tailfin.toml --benchmark creatures --out creatures/me.toml
+# 参数：--population 30 --generations 30 --bouts 4（每代每个体打几场）--hall 10（名人堂大小，0 = 关闭）
+```
+
+参考数据（tailfin，约 3600 场模拟，对 `creatures/` 里 5 个从没见过的对手）：只对石头训练的默认 GA 得 0.74，协同进化得 **1.43**。种群内的"最好适应度"一直在 1.0 附近徘徊，而对基准的成绩在上升：这正是相对适应度的特点。
+
+#### 泛化：换一条赛道还能跑吗
+
+老师可以在 `arena.toml` 里把比赛赛道设成起伏地形或斜坡（见"规则"），甚至不公开 `terrain_seed`。只在一条赛道上进化的生物可能**过拟合**这条赛道。解决办法和机器学习一样：在多个环境上训练，在没见过的环境上测试。
+
+```python
+# 训练：每个基因组在 4 条地形（种子 0..3）上评估，并随机改变摩擦 ±30%，取最差成绩
+train = Problem("creatures/worm.toml", rules="班级/arena.toml",
+                trials=4, env_seed=0, friction_jitter=0.3, aggregate="min")
+# 测试：20 条没见过的地形（种子 1000..1019）
+test = Problem("creatures/worm.toml", rules="班级/arena.toml", trials=20, env_seed=1000)
+```
+
+| 参数 | 含义 |
+|---|---|
+| `trials` | 每次评估用几个环境（默认 1 = 就是规则里那一个） |
+| `env_seed` | 第一个环境的地形种子，第 k 个用 `env_seed + k`（默认用规则里的 `terrain_seed`） |
+| `friction_jitter` | 每个环境的摩擦乘以 [1−j, 1+j] 里的随机数 |
+| `aggregate` | `"mean"` 平均（通常表现好）或 `"min"` 最差情况（每种情况都不差） |
+
+注意：`trials=4` 时每次评估要跑 4 场模拟，花费是 4 倍。
+
+[`python/generalize.py`](python/generalize.py) 是一个现成的对比实验：`single`（一条地形）、`multi`（多条地形取平均）、`robust`（多条地形 + 摩擦扰动，取最差），各自进化，再在 20 条没见过的地形上测试。我们跑出来的结果**并不是"多环境一定好"**：
+
+| 设置 | 方法 | 训练 | 测试平均 | 测试最差 | 打滑时最差 |
+|---|---|---|---|---|---|
+| worm，起伏 0.3 m，同样模拟次数 | single | 11.9 | **11.4** | **9.4** | **9.4** |
+| | multi | 8.2 | 7.8 | 3.4 | 6.4 |
+| | robust | 7.8 | 8.0 | 5.0 | 6.7 |
+| walker 连身体，起伏 0.6 m，同样评估次数 | single | 6.4 | 5.4 | 1.4 | 0.4 |
+| | multi | 8.7 | **8.4** | **5.8** | **6.1** |
+| | robust | 2.9 | 5.1 | 2.8 | 2.2 |
+
+![terrain](docs/terrain.png)
+
+*起伏 0.4 m + 3° 上坡的赛道。平地上第一名的 Walker Racer 在这里卡在 1.8 m：过拟合了平地。*
+
+地形平缓、算力相同时，单环境训练更划算（多环境把算力分薄了）；地形崎岖、身体也在进化时，单环境训练的生物在没见过的地形上会崩（最差 1.4 m），多环境训练的稳得多。而直接优化最差情况（robust，`aggregate="min"`）在这两组里都不如优化平均：最差值作为训练信号更"硬"，梯度信息更少。**什么时候值得付出多环境的代价、该优化平均还是最差**，本身就是好的实验题目。
+
+```bash
+python3 python/generalize.py creatures/worm.toml --roughness 0.3                       # 同样模拟次数
+python3 python/generalize.py creatures/walker.toml --level body --roughness 0.6 --same evaluations --budget 1000
+```
+
+`ga.py` 也支持这些参数：`--trials 4 --env-seed 0 --friction-jitter 0.3 --aggregate min`。
 
 #### Rust
 
@@ -222,6 +291,9 @@ race_time = 15.0          # 赛跑时长 (s)
 sumo_time = 20.0          # 相扑时长 (s)
 ring_width = 8.0          # 相扑台宽度 (m)
 friction = 0.9
+terrain_roughness = 0.0   # 赛道起伏高度 (m)，0 = 平地；起跑区 1 m 以内总是平的
+terrain_seed = 0          # 哪一条随机地形；可以不告诉学生
+slope = 0.0               # 赛道坡度（度），正数 = 上坡
 ```
 
 学生在自己的文件夹里进化时，用 `--rules 班级/arena.toml`（Python：`rules=...`）保证和比赛规则一致。
@@ -254,9 +326,10 @@ arena/
 │   ├── problem.rs    # 学生 GA 面对的黑盒接口：dim / start / evaluate_batch / save
 │   ├── game.rs       # 适应度、文件夹加载、循环赛
 │   └── bin/
-│       ├── arena.rs      # 命令行（info / eval / batch / save / judge / rules / convert / check / race / tournament）
+│       ├── arena.rs      # 命令行（info / eval / batch / fight / save / judge / rules / convert / check / race / tournament）
 │       └── arena-gui.rs  # 界面（eframe/egui）
-├── python/           # arena.py 接口、ga.py 默认 GA、my_ga.py 骨架、random_search.py 基线、evolve_structure.py 结构进化
+├── python/           # arena.py 接口、ga.py 默认 GA、my_ga.py 骨架、random_search.py 基线、
+│                     # evolve_structure.py 结构进化、coevolve.py 协同进化、generalize.py 泛化实验
 ├── examples/         # reference_ga.rs 参考答案（教师）
 └── creatures/        # 示例生物
 ```
@@ -270,5 +343,8 @@ arena/
 - 同样是进化结构，定长槽位编码（`--level structure`）和直接结构变异（`evolve_structure.py`）差很多：**表示方式**怎么影响进化？
 - `structure` 层级为什么"忘掉"了模板？怎样的初始种群能保住它（比如用模板的变异体填满初始种群）？
 - 为赛跑进化的生物，相扑为什么常常打不过（反之亦然）？专才和通才。
-- 相扑里经常出现"石头剪刀布"式的循环克制，没有绝对最强：这和协同进化有什么关系？如果拿对手的冠军来当训练对手呢？
+- 相扑里经常出现"石头剪刀布"式的循环克制，没有绝对最强。协同进化时把名人堂关掉（`--hall 0`），会发生什么？
+- 协同进化时，种群内的"最好适应度"为什么不能说明进步？还有什么办法衡量？
+- 在平地上进化的冠军，放到起伏赛道上还是冠军吗？（界面里放一个 `terrain_roughness = 0.4` 的 `arena.toml` 就能看到）
+- 多环境训练什么时候值得？和机器学习里的训练集 / 测试集、数据增强有什么相同和不同？
 - GA 找到的"作弊"步态（比如翻个身滑行）：是 bug 还是创新？规则应该怎么改？

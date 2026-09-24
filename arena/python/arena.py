@@ -58,15 +58,23 @@ class Problem:
                "structure" + how many segments and who attaches to whom
     opponents: sumo only, folder of creatures to fight (default: the Rock)
     rules:     rules file (default: arena.toml next to the template)
+
+    Environments (for generalisation; defaults = exactly the rules):
+    trials:          evaluate every genome on this many environments
+    env_seed:        terrain seed of the first one; trial k uses env_seed + k
+    friction_jitter: scale friction by a random factor in [1 - j, 1 + j]
+    aggregate:       combine the scores by "mean" or "min" (worst case)
     """
 
-    def __init__(self, template, mode="race", level="brain", opponents=None, rules=None):
+    def __init__(self, template, mode="race", level="brain", opponents=None, rules=None,
+                 trials=1, env_seed=None, friction_jitter=0.0, aggregate="mean"):
         self._bin = _find_binary()
         self._args = [str(template), "--mode", mode, "--level", level]
         if opponents:
             self._args += ["--opponents", str(opponents)]
         if rules:
             self._args += ["--rules", str(rules)]
+        self._args += _env_args(trials, env_seed, friction_jitter, aggregate)
         self.info = json.loads(self._run("info", "--json"))
         self.dim = self.info["dim"]
         self.genes = [g["name"] for g in self.info["genes"]]
@@ -89,6 +97,19 @@ class Problem:
         self.evaluations += len(population)
         return [float(line) for line in out.split()]
 
+    def fight(self, pairs):
+        """Sumo duels for co-evolution. `pairs` is a list of (genome_a, genome_b);
+        returns the score of a against b for each (+1 win / 0 draw / -1 loss,
+        plus ring control). b's score is the negative, so one bout rates both."""
+        for k, (a, b) in enumerate(pairs):
+            if len(a) != self.dim or len(b) != self.dim:
+                raise ValueError(f"pair {k}: genomes must have {self.dim} genes")
+        text = "\n".join(",".join(repr(float(x)) for x in a) + " | " + ",".join(repr(float(x)) for x in b)
+                         for a, b in pairs)
+        out = self._run("fight", stdin=text)
+        self.evaluations += len(pairs)
+        return [float(line) for line in out.split()]
+
     def save(self, genome, path, name=None):
         """Write the creature for `genome` to `path`; returns its fitness."""
         extra = ["--genes", ",".join(repr(float(x)) for x in genome), "--out", str(path)]
@@ -103,6 +124,13 @@ class Problem:
         for g, x in zip(self.info["genes"], genome):
             lines.append(f"{g['name']:<22} {g['lo'] + x * (g['hi'] - g['lo']):8.2f}")
         return "\n".join(lines)
+
+
+def _env_args(trials, env_seed, friction_jitter, aggregate):
+    args = ["--trials", str(trials), "--friction-jitter", str(friction_jitter), "--aggregate", aggregate]
+    if env_seed is not None:
+        args += ["--env-seed", str(env_seed)]
+    return args
 
 
 def _arena(*args, stdin=None):
@@ -128,10 +156,12 @@ class Judge:
     mode:      "race" or "sumo"
     opponents: sumo only, folder of creatures to fight (default: the Rock)
     rules:     rules file (default: built-in rules)
+    trials, env_seed, friction_jitter, aggregate: see Problem
     """
 
-    def __init__(self, mode="race", opponents=None, rules=None):
-        self._args = ["--mode", mode]
+    def __init__(self, mode="race", opponents=None, rules=None,
+                 trials=1, env_seed=None, friction_jitter=0.0, aggregate="mean"):
+        self._args = ["--mode", mode, *_env_args(trials, env_seed, friction_jitter, aggregate)]
         if opponents:
             self._args += ["--opponents", str(opponents)]
         self._rules_args = [str(rules)] if rules else []
@@ -148,4 +178,12 @@ class Judge:
         res = _arena("judge", *self._args, stdin=text)
         self.errors = [line for line in res.stderr.splitlines() if line.strip()]
         self.evaluations += len(creatures)
+        return [float(x) for x in res.stdout.split()]
+
+    def fight(self, pairs):
+        """Sumo duels between creature dicts: score of a against b for each (a, b)."""
+        text = "\n".join(json.dumps([a, b]) for a, b in pairs)
+        res = _arena("judge", "--pairs", *self._args, stdin=text)
+        self.errors = [line for line in res.stderr.splitlines() if line.strip()]
+        self.evaluations += len(pairs)
         return [float(x) for x in res.stdout.split()]
