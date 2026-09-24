@@ -1,6 +1,6 @@
-# CPG Arena: 自己写遗传算法，进化人造生物
+# CPG Arena: 用遗传算法进化人造生物
 
-一个轻量级的教学游戏。每个学生设计一只由方块和关节组成的 2D 生物，关节由 **CPG（中枢模式发生器）** 驱动。学生**自己写遗传算法**进化它的参数，然后把生物文件放进同一个文件夹里比赛：**赛跑**比谁跑得远，**相扑**比谁把对手推下台。
+一个轻量级的教学游戏。每个学生设计一只由方块和关节组成的 2D 生物，关节由 **CPG（中枢模式发生器）** 驱动。学生用**默认遗传算法**或**自己写的遗传算法**进化它的参数，然后把生物文件放进同一个文件夹里比赛：**赛跑**比谁跑得远，**相扑**比谁把对手推下台。
 
 | 赛跑（每只生物一条赛道） | 相扑（循环赛 + 决赛回放） |
 |---|---|
@@ -16,7 +16,7 @@
 cd arena
 cargo build --release                        # 需要 Rust ≥ 1.92
 ./target/release/arena-gui creatures         # 打开界面
-python3 python/my_ga.py                      # 跑一遍 GA 骨架
+python3 python/ga.py creatures/worm.toml --out creatures/me.toml   # 用默认 GA 进化一只
 ```
 
 Linux 如果报 `libxkbcommon-x11.so could not be loaded`：`sudo apt install libxkbcommon-x11-0`。
@@ -27,9 +27,9 @@ Linux 如果报 `libxkbcommon-x11.so could not be loaded`：`sudo apt install li
 ## 学生要做什么
 
 ```text
-1. 设计身体             2. 写 GA 进化参数                  3. 提交                 4. 比赛
-worm.toml  ─────────▶  python/my_ga.py  ──────────────▶  me.toml 拷进班级文件夹 ──▶ arena-gui 班级文件夹
-（手写拓扑）           （选择 / 交叉 / 变异由你实现）                             （自动刷新）
+1. 设计身体             2. 进化参数                         3. 提交                 4. 比赛
+worm.toml  ─────────▶  python/ga.py（默认 GA）  ────────▶  me.toml 拷进班级文件夹 ──▶ arena-gui 班级文件夹
+（手写拓扑）           或 python/my_ga.py（自己写）                              （自动刷新）
 ```
 
 ### 1. 设计身体：生物文件
@@ -94,10 +94,36 @@ p.save(best, "me.toml", name="我的冠军")   # 写成生物文件，返回适�
 **一代调用一次 `evaluate`**（传整个种群），不要一个个体调一次：整代在 Rust 里多核并行跑，一次 15 秒的赛跑只要约 10 ms。
 
 起点文件：
-- [`python/my_ga.py`](python/my_ga.py)：GA 骨架，已经能跑，但 `select` / `crossover` / `mutate` 三个函数是占位的（进化不动）。**这是学生要填的地方。**
-- [`python/random_search.py`](python/random_search.py)：随机搜索基线。**你的 GA 在相同评估次数（BUDGET）下应该打败它。**
 
-参考数据（worm，赛跑，1000 次评估）：占位骨架 3.6 m，随机搜索 8.1 m，一个普通的 GA 约 11 m。
+| 文件 | 用途 |
+|---|---|
+| [`python/ga.py`](python/ga.py) | **默认 GA，直接能用**（锦标赛选择 + BLX-α 交叉 + 高斯变异 + 精英保留）。每个算子是一个独立函数，可以只替换其中一个 |
+| [`python/my_ga.py`](python/my_ga.py) | 从零写 GA 的骨架：已经能跑，但 `select` / `crossover` / `mutate` 是占位的（进化不动） |
+| [`python/random_search.py`](python/random_search.py) | 随机搜索基线：**你的 GA 在相同评估次数（BUDGET）下应该打败它** |
+
+直接用默认 GA：
+
+```bash
+python3 python/ga.py creatures/worm.toml --out creatures/me.toml --name "我的虫"
+python3 python/ga.py creatures/walker.toml --body --budget 2000 --out ...             # 连身体一起进化
+python3 python/ga.py creatures/tailfin.toml --mode sumo --opponents 班级文件夹 --out ...
+# 其他参数：--population 50  --sigma 0.1（变异强度）  --seed 1  --rules 班级/arena.toml  --history h.csv（每代曲线）
+```
+
+只换一个算子，其余沿用默认：
+
+```python
+from arena import Problem
+import ga
+
+def my_mutation(genome):
+    ...                                   # 你的变异
+
+best, fitness = ga.run(Problem("creatures/worm.toml"), budget=1000, mutate=my_mutation)
+# 同样可以替换 select=... 或 crossover=...，或者调 population / elites / crossover_rate
+```
+
+参考数据（worm，赛跑，1000 次评估）：占位骨架 3.6 m，随机搜索 8.1 m，默认 GA 10.9 m。
 
 #### 其他语言：命令行协议
 
@@ -162,7 +188,9 @@ friction = 0.9
 
 相扑适应度里的连续项是为了给 GA 一个平滑的信号，否则大多数个体都是 0 分，进化很难起步。
 
-**参考答案**：[`examples/reference_ga.rs`](examples/reference_ga.rs) 是一个实数编码 GA（锦标赛选择、BLX-α 交叉、高斯变异、精英保留），用的是和学生相同的接口。分发给学生前可以删掉。
+[`examples/reference_ga.rs`](examples/reference_ga.rs) 是同一个算法的 Rust 版本，用的是 Rust 接口，也可以当作 Rust 用法示例。
+
+如果作业是"从零写 GA"，分发前可以删掉 `python/ga.py`，只留 `my_ga.py` 骨架和 `random_search.py` 基线。
 
 ```bash
 cargo run --release --example reference_ga -- creatures/worm.toml race 1000 out.toml
@@ -183,14 +211,15 @@ arena/
 │   └── bin/
 │       ├── arena.rs      # 命令行（info / eval / batch / save / check / race / tournament）
 │       └── arena-gui.rs  # 界面（eframe/egui）
-├── python/           # arena.py 接口、my_ga.py 骨架、random_search.py 基线
+├── python/           # arena.py 接口、ga.py 默认 GA、my_ga.py 骨架、random_search.py 基线
 ├── examples/         # reference_ga.rs 参考答案（教师）
 └── creatures/        # 示例生物
 ```
 
 ## 课堂可以讨论的问题
 
-- 同样 1000 次评估，你的 GA 比随机搜索好多少？换几个随机种子，结论还成立吗？
+- 同样 1000 次评估，你的 GA 比随机搜索、比默认 GA 好多少？换几个随机种子，结论还成立吗？
+- 把默认 GA 的变异换成"不变异"、交叉换成"直接复制"：各自损失多少？哪个算子最重要？
 - 种群大小、变异强度怎么影响收敛速度和最终结果？探索和利用。
 - 只调 CPG 参数 vs 连身体一起进化（`body=True`）：搜索空间变大了多少，结果更好还是更差？
 - 为赛跑进化的生物，相扑为什么常常打不过（反之亦然）？专才和通才。

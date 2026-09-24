@@ -1,7 +1,6 @@
-//! Reference solution for teachers: a real-coded GA (tournament selection,
+//! Rust version of the default GA (python/ga.py): a real-coded GA (tournament selection,
 //! BLX-α crossover, Gaussian mutation, elitism) on top of the same
-//! [`Problem`] interface students use. Remove this file before handing the
-//! repository to students if you don't want them to see a solution.
+//! [`Problem`] interface students use. Also an example of the Rust API.
 //!
 //! cargo run --release --example reference_ga -- creatures/worm.toml [race|sumo] [budget] [out.toml]
 

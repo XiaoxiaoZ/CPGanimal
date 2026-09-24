@@ -3,7 +3,9 @@
     python3 python/my_ga.py
 
 It runs as-is, but with the placeholder operators nothing improves.
-Compare your result with python/random_search.py at the same BUDGET.
+Compare your result with python/random_search.py and the default GA
+(python/ga.py) at the same BUDGET. You may also borrow single operators
+from ga.py, e.g. `from ga import tournament`, and write only the rest.
 """
 
 import random
