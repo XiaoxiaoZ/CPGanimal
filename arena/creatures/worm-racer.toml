@@ -1,0 +1,66 @@
+name = "Worm Racer"
+author = "example"
+color = [
+    230,
+    120,
+    40,
+]
+
+[brain]
+frequency = 2.5501530605475353
+coupling = 6.325746161143244
+
+[[segment]]
+parent = 0
+attach = 0.0
+angle = 0.0
+length = 0.4
+width = 0.12
+amplitude = 0.0
+offset = 0.0
+phase = 0.0
+
+[[segment]]
+parent = 0
+attach = 1.0
+angle = 0.0
+length = 0.4
+width = 0.12
+amplitude = 11.976938017944732
+offset = 44.03012820537488
+phase = 109.00818460955406
+
+[[segment]]
+parent = 1
+attach = 1.0
+angle = 0.0
+length = 0.4
+width = 0.12
+amplitude = 59.67879331808775
+offset = -37.263032166592815
+phase = 68.91087130691494
+
+[[segment]]
+parent = 2
+attach = 1.0
+angle = 0.0
+length = 0.4
+width = 0.12
+amplitude = 52.76147410204537
+offset = 37.49507863793251
+phase = -90.12429546113407
+
+[[segment]]
+parent = 3
+attach = 1.0
+angle = 0.0
+length = 0.4
+width = 0.12
+amplitude = 59.070597167236286
+offset = -7.711532500228145
+phase = -23.98969499005767
+
+[meta]
+trained_for = "race"
+fitness = 20.683129501342773
+evaluations = 1440

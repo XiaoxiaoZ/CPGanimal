@@ -1,0 +1,30 @@
+# A heavy body with one long tail. Simple, but can it push?
+name = "Tailfin"
+author = "example"
+color = [90, 190, 90]
+
+[brain]
+frequency = 1.2
+coupling = 4.0
+
+[[segment]]        # 0: body
+length = 0.7
+width = 0.3
+
+[[segment]]        # 1: tail base, sticks out of the back
+parent = 0
+attach = -1.0
+angle = -150.0
+length = 0.5
+width = 0.1
+amplitude = 40.0
+phase = 0.0
+
+[[segment]]        # 2: tail tip
+parent = 1
+attach = 1.0
+angle = 0.0
+length = 0.4
+width = 0.08
+amplitude = 40.0
+phase = 90.0

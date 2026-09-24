@@ -7,3 +7,10 @@ Alexander Sproewitz, Rico Moeckel, Jerome Maye, Auke Jan Ijspeert
 School of Computer and Communication Science
 EPFL - Ecole Polytechnique Federale de Lausanné
 Station 14, CH-1015 Lausanne, Switzerland
+
+## Rust version: CPG Arena
+
+[`arena/`](arena) is a lightweight Rust rewrite turned into a teaching game:
+students write their own genetic algorithm to evolve CPG-driven 2D creatures, drop the
+files into a shared folder, and race them or make them wrestle.
+See [arena/README.md](arena/README.md).
