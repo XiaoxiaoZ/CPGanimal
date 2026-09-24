@@ -1,0 +1,47 @@
+name = "Tailfin Sumo"
+author = "example"
+color = [
+    90,
+    190,
+    90,
+]
+
+[brain]
+frequency = 1.175905775083069
+coupling = 2.1184072085395584
+
+[[segment]]
+parent = 0
+attach = 0.0
+angle = 0.0
+length = 0.5510335552520287
+width = 0.16841050446425265
+amplitude = 0.0
+offset = 0.0
+phase = 0.0
+
+[[segment]]
+parent = 0
+attach = -0.8058089987162493
+angle = -156.42407729584247
+length = 0.5122914165343369
+width = 0.22302373888149646
+amplitude = 30.148725010010637
+offset = -27.584503602513514
+phase = 10.391822281267366
+
+[[segment]]
+parent = 1
+attach = -0.14987734080928594
+angle = -103.8714472772866
+length = 0.956130859690974
+width = 0.12962434546382945
+amplitude = 38.305370076538566
+offset = -2.346094842802117
+phase = -25.224171789139007
+
+[meta]
+trained_for = "sumo"
+fitness = 1.6981447769209157
+generations = 30
+evaluations = 1440

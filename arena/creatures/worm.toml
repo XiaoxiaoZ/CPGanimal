@@ -1,0 +1,51 @@
+# A 5-segment worm, like the MATLAB Snake5 model but in 2D side view.
+# Every segment after the first hangs off the previous one through a motor
+# joint. Each joint is driven by one CPG oscillator.
+name = "Worm"
+author = "example"
+color = [230, 120, 40]
+
+[brain]
+frequency = 1.0   # Hz, shared by all joints
+coupling = 4.0    # how strongly neighbouring oscillators synchronise
+
+[[segment]]       # 0: head/torso, no joint
+length = 0.4
+width = 0.12
+
+[[segment]]
+parent = 0
+attach = 1.0      # -1 = back end of the parent, 0 = middle, 1 = front end
+angle = 0.0       # rest angle relative to the parent (deg); 0 = straight on
+length = 0.4
+width = 0.12
+amplitude = 30.0  # joint swing (deg)
+offset = 0.0      # shift of the swing centre (deg)
+phase = 0.0       # timing of this joint (deg); differences between joints matter
+
+[[segment]]
+parent = 1
+attach = 1.0
+angle = 0.0
+length = 0.4
+width = 0.12
+amplitude = 30.0
+phase = 90.0
+
+[[segment]]
+parent = 2
+attach = 1.0
+angle = 0.0
+length = 0.4
+width = 0.12
+amplitude = 30.0
+phase = 180.0
+
+[[segment]]
+parent = 3
+attach = 1.0
+angle = 0.0
+length = 0.4
+width = 0.12
+amplitude = 30.0
+phase = 270.0

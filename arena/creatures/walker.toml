@@ -1,0 +1,49 @@
+# A four-legged walker seen from the side: torso + front leg + back leg,
+# each leg with a thigh and a shin.
+name = "Walker"
+author = "example"
+color = [60, 150, 230]
+
+[brain]
+frequency = 1.0
+coupling = 4.0
+
+[[segment]]        # 0: torso
+length = 0.8
+width = 0.15
+
+[[segment]]        # 1: front thigh, hangs down from the front of the torso
+parent = 0
+attach = 0.9
+angle = -80.0
+length = 0.35
+width = 0.08
+amplitude = 25.0
+phase = 0.0
+
+[[segment]]        # 2: front shin
+parent = 1
+attach = 1.0
+angle = 20.0
+length = 0.3
+width = 0.06
+amplitude = 20.0
+phase = 90.0
+
+[[segment]]        # 3: back thigh
+parent = 0
+attach = -0.9
+angle = -80.0
+length = 0.35
+width = 0.08
+amplitude = 25.0
+phase = 180.0
+
+[[segment]]        # 4: back shin
+parent = 3
+attach = 1.0
+angle = 20.0
+length = 0.3
+width = 0.06
+amplitude = 20.0
+phase = 270.0

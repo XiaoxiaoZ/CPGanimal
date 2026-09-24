@@ -1,0 +1,67 @@
+name = "Walker Racer"
+author = "example"
+color = [
+    60,
+    150,
+    230,
+]
+
+[brain]
+frequency = 2.369047071227721
+coupling = 6.9955239518757955
+
+[[segment]]
+parent = 0
+attach = 0.0
+angle = 0.0
+length = 0.19916800971755688
+width = 0.15444146117078322
+amplitude = 0.0
+offset = 0.0
+phase = 0.0
+
+[[segment]]
+parent = 0
+attach = -0.05003670545070238
+angle = -142.67310710735597
+length = 0.33114896544247174
+width = 0.10691895643575698
+amplitude = 12.674993183386606
+offset = -22.271886240751513
+phase = -26.051029395324804
+
+[[segment]]
+parent = 1
+attach = -0.5065086209004792
+angle = -154.34815580660867
+length = 0.5801790007267605
+width = 0.0888507189391994
+amplitude = 56.04551165282963
+offset = 17.500286397965034
+phase = -67.95773249997742
+
+[[segment]]
+parent = 0
+attach = -0.03070424547378725
+angle = 91.73703234856083
+length = 0.2518663231468643
+width = 0.13636874301114987
+amplitude = 27.593909735222446
+offset = 17.80898006353239
+phase = -99.14564920114303
+
+[[segment]]
+parent = 3
+attach = 0.27732301326561526
+angle = -18.673015115294078
+length = 0.3623701138057638
+width = 0.10879807092719662
+amplitude = 32.7711978365145
+offset = -44.15246994192035
+phase = -72.22886809527805
+
+[meta]
+trained_for = "race"
+fitness = 22.76733821380567
+generations = 40
+evaluations = 1920

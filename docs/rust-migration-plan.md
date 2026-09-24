@@ -1,6 +1,6 @@
 # CPGanimal: Plan for porting from MATLAB to Rust
 
-> Status: draft, pending discussion
+> Status: superseded by the lightweight teaching game in `arena/` (see arena/README.md). Kept for reference: the analysis of the MATLAB model and the research-grade design notes still apply.
 > Scope: rewrite the Snake5 / chain_CPG simulations in Rust and expose a clean interface for genetic-algorithm (and other black-box optimizer) training.
 
 ---
