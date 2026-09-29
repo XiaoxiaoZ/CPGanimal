@@ -120,21 +120,7 @@ impl Arena {
     /// Build a creature with its centre of area at `x`, resting just above y = 0.
     fn spawn(&mut self, c: &Creature, team: usize, x: f64, mirror: bool) {
         let rules = &self.rules;
-        // Forward kinematics of the rest pose: (center, angle) per segment.
-        let mut pose: Vec<([f64; 2], f64)> = Vec::with_capacity(c.segments.len());
-        for (i, s) in c.segments.iter().enumerate() {
-            if i == 0 {
-                pose.push(([0.0, 0.0], 0.0));
-                continue;
-            }
-            let p = &c.segments[s.parent];
-            let (pc, pa) = pose[s.parent];
-            let d = s.attach * p.length / 2.0;
-            let joint = [pc[0] + d * pa.cos(), pc[1] + d * pa.sin()];
-            let a = pa + s.angle.to_radians();
-            let h = s.length / 2.0;
-            pose.push(([joint[0] + h * a.cos(), joint[1] + h * a.sin()], a));
-        }
+        let mut pose = rest_pose(c);
         let sign = if mirror { -1.0 } else { 1.0 };
         if mirror {
             for (p, a) in &mut pose {
@@ -311,6 +297,27 @@ impl Arena {
         };
         Some(res(winner, "time up, ring control", margin))
     }
+}
+
+/// Forward kinematics of the rest pose: (centre, angle in radians) of every
+/// segment, with the torso at the origin pointing right. Each segment starts
+/// at its joint on the parent's axis and points along parent angle + `angle`.
+pub fn rest_pose(c: &Creature) -> Vec<([f64; 2], f64)> {
+    let mut pose: Vec<([f64; 2], f64)> = Vec::with_capacity(c.segments.len());
+    for (i, s) in c.segments.iter().enumerate() {
+        if i == 0 {
+            pose.push(([0.0, 0.0], 0.0));
+            continue;
+        }
+        let p = &c.segments[s.parent];
+        let (pc, pa) = pose[s.parent];
+        let d = s.attach * p.length / 2.0;
+        let joint = [pc[0] + d * pa.cos(), pc[1] + d * pa.sin()];
+        let a = pa + s.angle.to_radians();
+        let h = s.length / 2.0;
+        pose.push(([joint[0] + h * a.cos(), joint[1] + h * a.sin()], a));
+    }
+    pose
 }
 
 /// Deterministic pseudo-random number in [0, 1) from an integer and a seed.

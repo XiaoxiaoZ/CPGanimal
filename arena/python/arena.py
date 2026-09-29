@@ -22,9 +22,14 @@ To evolve structure with your own operators (add a leg, remove a segment,
     j.evaluate([worm, ...])                        # -> fitness list; rule breakers get -inf,
     j.errors                                       #    and the reasons are here
     save_creature(worm, "me.toml")
+
+When run from the Train tab of arena-gui, every population that is rated
+(by `evaluate`, or by a round of `fight` in co-evolution) is also written to the
+file in ARENA_WATCH, so the GUI can replay each generation.
 """
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -37,10 +42,14 @@ def _find_binary():
     if os.environ.get("ARENA_BIN"):
         return os.environ["ARENA_BIN"]
     here = Path(__file__).resolve().parent.parent
-    for name in ("arena", "arena.exe"):
-        p = here / "target" / "release" / name
-        if p.exists():
-            return str(p)
+    targets = [here / "target"]
+    if os.environ.get("CARGO_TARGET_DIR"):
+        targets.insert(0, Path(os.environ["CARGO_TARGET_DIR"]))
+    for target in targets:
+        for name in ("arena", "arena.exe"):
+            p = target / "release" / name
+            if p.exists():
+                return str(p)
     found = shutil.which("arena")
     if found:
         return found
@@ -75,6 +84,8 @@ class Problem:
         if rules:
             self._args += ["--rules", str(rules)]
         self._args += _env_args(trials, env_seed, friction_jitter, aggregate)
+        self._watch = {"kind": "genomes", "template": os.path.abspath(template), "mode": mode, "level": level,
+                       "opponents": _abspath(opponents), "rules": _abspath(rules)}
         self.info = json.loads(self._run("info", "--json"))
         self.dim = self.info["dim"]
         self.genes = [g["name"] for g in self.info["genes"]]
@@ -95,7 +106,9 @@ class Problem:
         text = "\n".join(",".join(repr(float(x)) for x in g) for g in population)
         out = self._run("batch", stdin=text)
         self.evaluations += len(population)
-        return [float(line) for line in out.split()]
+        fitness = [float(line) for line in out.split()]
+        _watch(lambda: (dict(self._watch, genomes=[[float(x) for x in g] for g in population]), fitness), self.evaluations)
+        return fitness
 
     def fight(self, pairs):
         """Sumo duels for co-evolution. `pairs` is a list of (genome_a, genome_b);
@@ -108,7 +121,9 @@ class Problem:
                          for a, b in pairs)
         out = self._run("fight", stdin=text)
         self.evaluations += len(pairs)
-        return [float(line) for line in out.split()]
+        scores = [float(line) for line in out.split()]
+        _watch(lambda: _duel_population(self._watch, "genomes", pairs, scores, lambda a: [float(x) for x in a]), self.evaluations)
+        return scores
 
     def save(self, genome, path, name=None):
         """Write the creature for `genome` to `path`; returns its fitness."""
@@ -131,6 +146,36 @@ def _env_args(trials, env_seed, friction_jitter, aggregate):
     if env_seed is not None:
         args += ["--env-seed", str(env_seed)]
     return args
+
+
+def _abspath(path):
+    return os.path.abspath(path) if path else None
+
+
+def _watch(make, evaluations):
+    """Append one rated population to ARENA_WATCH as a JSON line. make() gives the
+    record and its fitness; a single evaluation (e.g. a champion's check) is not a population."""
+    path = os.environ.get("ARENA_WATCH")
+    if not path:
+        return
+    record, fitness = make()
+    if len(fitness) < 2:
+        return
+    line = dict(record, fitness=[f if math.isfinite(f) else None for f in fitness], evaluations=evaluations)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(line) + "\n")
+
+
+def _duel_population(record, key, pairs, scores, convert):
+    """The population a round of co-evolution duels rated: each first fighter
+    once, with its mean score over its duels. Individuals are told apart by
+    object, not content: a child can be an exact copy of its parent."""
+    rated = {}
+    for (a, _), s in zip(pairs, scores):
+        entry = rated.setdefault(id(a), [a, 0.0, 0])
+        entry[1] += s
+        entry[2] += 1
+    return dict(record, **{key: [convert(a) for a, _, _ in rated.values()]}), [total / n for _, total, n in rated.values()]
 
 
 def _arena(*args, stdin=None):
@@ -167,6 +212,7 @@ class Judge:
         self._rules_args = [str(rules)] if rules else []
         if rules:
             self._args += ["--rules", str(rules)]
+        self._watch = {"kind": "creatures", "mode": mode, "opponents": _abspath(opponents), "rules": _abspath(rules)}
         self.rules = json.loads(_arena("rules", *self._rules_args).stdout)
         self.errors = []
         self.evaluations = 0
@@ -178,7 +224,9 @@ class Judge:
         res = _arena("judge", *self._args, stdin=text)
         self.errors = [line for line in res.stderr.splitlines() if line.strip()]
         self.evaluations += len(creatures)
-        return [float(x) for x in res.stdout.split()]
+        fitness = [float(x) for x in res.stdout.split()]
+        _watch(lambda: (dict(self._watch, creatures=list(creatures)), fitness), self.evaluations)
+        return fitness
 
     def fight(self, pairs):
         """Sumo duels between creature dicts: score of a against b for each (a, b)."""
@@ -186,4 +234,6 @@ class Judge:
         res = _arena("judge", "--pairs", *self._args, stdin=text)
         self.errors = [line for line in res.stderr.splitlines() if line.strip()]
         self.evaluations += len(pairs)
-        return [float(x) for x in res.stdout.split()]
+        scores = [float(x) for x in res.stdout.split()]
+        _watch(lambda: _duel_population(self._watch, "creatures", pairs, scores, lambda a: a), self.evaluations)
+        return scores
