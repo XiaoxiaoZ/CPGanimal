@@ -1,16 +1,21 @@
 //! Arena viewer: loads a folder of creature files and shows races and sumo bouts.
 //!
 //! Usage: `arena-gui [folder] [--race | --tournament]` (default folder
-//! `creatures`; the flags start that event right away). Files are reloaded
-//! automatically when they change, so students can train in a terminal and
-//! watch the result appear.
+//! `creatures`; the flags start that event right away). Another folder can be
+//! picked with Browse… in the top bar. Files are reloaded automatically when
+//! they change, so students can train in a terminal (or in the Train tab) and
+//! watch the result appear. Creatures made in the Design and Train tabs are
+//! saved to the creatures folder.
+
+mod design;
+mod train;
 
 use cpg_arena::creature::{Creature, Rules};
 use cpg_arena::game::{self, Bout, Entry, Standing};
 use cpg_arena::sim::{Arena, SumoResult};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, Vec2};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 
 const PALETTE: [[u8; 3]; 8] = [
@@ -26,7 +31,7 @@ const PALETTE: [[u8; 3]; 8] = [
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let folder = args.iter().find(|a| !a.starts_with("--")).map(PathBuf::from).unwrap_or_else(|| "creatures".into());
+    let folder = args.iter().find(|a| !a.starts_with("--")).map(PathBuf::from).unwrap_or_else(creatures_dir);
     let mut app = App::new(folder);
     if args.iter().any(|a| a == "--race") {
         app.start_race();
@@ -46,10 +51,28 @@ fn main() -> eframe::Result {
 enum Tab {
     Race,
     Sumo,
+    Design,
+    Train,
+}
+
+/// The project's creatures folder: designed and trained creatures are saved here.
+fn creatures_dir() -> PathBuf {
+    let built_in = Path::new(env!("CARGO_MANIFEST_DIR")).join("creatures");
+    [PathBuf::from("creatures"), built_in.clone()]
+        .into_iter()
+        .find(|d| d.is_dir())
+        .map(|d| std::path::absolute(&d).unwrap_or(d))
+        .unwrap_or(built_in)
+}
+
+/// Whether two paths name the same existing folder.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y)
 }
 
 struct Racer {
-    entry: usize,
+    // Not an index into `entries`: the list is re-sorted when trained files appear.
+    name: String,
     arena: Arena,
     color: Color32,
 }
@@ -82,10 +105,16 @@ struct App {
     tour: Option<TourResult>,
     tour_pending: Option<Receiver<TourResult>>,
     camera: Option<(f32, f32)>,
+    /// Where the Design and Train tabs save creatures.
+    creatures: PathBuf,
+    designer: design::Designer,
+    trainer: train::Trainer,
 }
 
 impl App {
     fn new(folder: PathBuf) -> Self {
+        let folder = std::path::absolute(&folder).unwrap_or(folder);
+        let creatures = creatures_dir();
         let mut app = Self {
             folder_text: folder.display().to_string(),
             folder,
@@ -105,9 +134,52 @@ impl App {
             tour: None,
             tour_pending: None,
             camera: None,
+            trainer: train::Trainer::new(creatures.clone()),
+            designer: design::Designer::new(),
+            creatures,
         };
         app.reload(true);
         app
+    }
+
+    fn open_folder(&mut self, folder: PathBuf) {
+        let folder = std::path::absolute(&folder).unwrap_or(folder);
+        self.folder_text = folder.display().to_string();
+        self.folder = folder;
+        self.selected.clear();
+        self.entries.clear();
+        self.race.clear();
+        self.reload(true);
+    }
+
+    /// Show the creatures folder, where Design and Train save.
+    fn open_creatures(&mut self) {
+        if same_dir(&self.folder, &self.creatures) {
+            self.reload(false);
+        } else {
+            self.open_folder(self.creatures.clone());
+        }
+    }
+
+    fn design_action(&mut self, action: design::Action) {
+        match action {
+            design::Action::Train(path) => {
+                self.open_creatures();
+                self.trainer.use_template(&path, &self.entries);
+                self.tab = Tab::Train;
+            }
+        }
+    }
+
+    /// Native folder picker, starting from the current folder when it exists.
+    fn browse(&mut self) {
+        let mut dialog = rfd::FileDialog::new().set_title("Choose a creature folder");
+        if let Some(dir) = std::path::absolute(&self.folder).ok().filter(|p| p.is_dir()) {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(dir) = dialog.pick_folder() {
+            self.open_folder(dir);
+        }
     }
 
     fn reload(&mut self, select_all: bool) {
@@ -160,7 +232,7 @@ impl App {
         self.race = self
             .checked()
             .into_iter()
-            .map(|i| Racer { entry: i, arena: Arena::race(self.creature(i), &self.rules), color: self.color(i) })
+            .map(|i| Racer { name: self.creature(i).name.clone(), arena: Arena::race(self.creature(i), &self.rules), color: self.color(i) })
             .collect();
     }
 
@@ -256,17 +328,36 @@ impl eframe::App for App {
             }
         }
         self.advance(dt);
+        let training = self.trainer.poll();
+        let replaying = self.tab == Tab::Train && self.trainer.advance(dt, self.speed, self.paused);
+        let designing = self.tab == Tab::Design && self.designer.advance(dt, self.speed, self.paused);
 
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
         egui::Panel::left("creatures").resizable(true).default_size(260.0).show(ui, |ui| self.creature_list(ui));
         egui::Panel::right("results").resizable(true).default_size(300.0).show(ui, |ui| match self.tab {
             Tab::Race => self.race_panel(ui),
             Tab::Sumo => self.sumo_panel(ui),
+            Tab::Design => {
+                if let Some(a) = self.designer.panel(ui, &self.rules, &self.entries, &self.creatures) {
+                    self.design_action(a);
+                }
+            }
+            Tab::Train => {
+                if self.trainer.panel(ui, &self.folder, &self.entries) {
+                    self.open_creatures();
+                }
+            }
         });
-        egui::CentralPanel::default().show(ui, |ui| self.canvas(ui));
+        egui::CentralPanel::default().show(ui, |ui| match self.tab {
+            Tab::Design => self.designer.view(ui, &self.rules),
+            Tab::Train => self.trainer.view(ui),
+            _ => self.canvas(ui),
+        });
 
-        if self.running() || self.tour_pending.is_some() {
+        if self.running() || self.tour_pending.is_some() || replaying || designing {
             ctx.request_repaint();
+        } else if training {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         } else {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
@@ -281,10 +372,10 @@ impl App {
             ui.label("Folder");
             let r = ui.add(egui::TextEdit::singleline(&mut self.folder_text).desired_width(220.0));
             if ui.button("Load").clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
-                self.folder = PathBuf::from(&self.folder_text);
-                self.selected.clear();
-                self.entries.clear();
-                self.reload(true);
+                self.open_folder(PathBuf::from(&self.folder_text));
+            }
+            if ui.button("Browse…").clicked() {
+                self.browse();
             }
             if ui.button("⟳ Reload").clicked() {
                 self.reload(false);
@@ -292,6 +383,8 @@ impl App {
             ui.separator();
             ui.selectable_value(&mut self.tab, Tab::Race, "Race");
             ui.selectable_value(&mut self.tab, Tab::Sumo, "Sumo");
+            ui.selectable_value(&mut self.tab, Tab::Design, "Design");
+            ui.selectable_value(&mut self.tab, Tab::Train, "Train");
             ui.separator();
             let label = if self.paused { "▶ Play" } else { "⏸ Pause" };
             if ui.button(label).clicked() {
@@ -304,6 +397,9 @@ impl App {
     fn creature_list(&mut self, ui: &mut egui::Ui) {
         ui.heading("Creatures");
         ui.label(RichText::new(format!("{}", self.folder.display())).small().weak());
+        if !self.folder.is_dir() {
+            ui.colored_label(Color32::LIGHT_RED, "Folder not found: pick one with Browse…");
+        }
         if let Some(e) = &self.rules_error {
             ui.colored_label(Color32::LIGHT_RED, format!("arena.toml: {e}"));
         }
@@ -383,7 +479,7 @@ impl App {
                 let r = &self.race[*k];
                 let place = format!("{}", rank + 1);
                 ui.label(if done && rank == 0 { RichText::new(place + " ★").strong() } else { RichText::new(place) });
-                ui.colored_label(r.color, &self.creature(r.entry).name);
+                ui.colored_label(r.color, &r.name);
                 ui.label(if r.arena.is_broken() { "broke".to_string() } else { format!("{d:6.2} m") });
                 ui.end_row();
             }
@@ -509,42 +605,19 @@ impl App {
         let (cx, scale) = self.follow(((lo + hi) / 2.0, fit));
         let x0 = cx - rect.width() / 2.0 / scale;
         let x1 = cx + rect.width() / 2.0 / scale;
-        let label_every = if scale > 40.0 { 1 } else if scale > 15.0 { 5 } else { 10 };
 
         for (k, r) in self.race.iter().enumerate() {
             let top = rect.top() + k as f32 * lane_h;
+            let lane = Rect::from_min_max(Pos2::new(rect.left(), top), Pos2::new(rect.right(), top + lane_h));
             let ground_y = top + lane_h * 0.82;
             let to_screen = |p: [f32; 2]| Pos2::new(rect.center().x + (p[0] - cx) * scale, ground_y - p[1] * scale);
             if k % 2 == 1 {
-                painter.rect_filled(Rect::from_min_max(Pos2::new(rect.left(), top), Pos2::new(rect.right(), top + lane_h)), 0.0, Color32::from_rgb(33, 38, 48));
+                painter.rect_filled(lane, 0.0, Color32::from_rgb(33, 38, 48));
             }
-            painter.rect_filled(Rect::from_min_max(Pos2::new(rect.left(), ground_y), Pos2::new(rect.right(), ground_y + lane_h * 0.06 + 2.0)), 0.0, Color32::from_rgb(110, 90, 65));
-            for m in (x0.floor() as i32)..=(x1.ceil() as i32) {
-                if m % label_every != 0 {
-                    continue;
-                }
-                let x = to_screen([m as f32, 0.0]).x;
-                let tick = if m == 0 { Color32::WHITE } else { Color32::from_gray(150) };
-                painter.line_segment([Pos2::new(x, ground_y), Pos2::new(x, ground_y + 5.0)], Stroke::new(1.0, tick));
-                if k == n - 1 || lane_h > 60.0 {
-                    painter.text(Pos2::new(x, ground_y + 6.0), Align2::CENTER_TOP, format!("{m} m"), FontId::proportional(10.0), Color32::from_gray(170));
-                }
-            }
-            // Hills: filled columns between the ground line and the terrain surface.
-            let hill = Color32::from_rgb(110, 90, 65);
-            let visible: Vec<&[f32; 2]> = r.arena.terrain.iter().filter(|p| p[0] >= x0 - 0.2 && p[0] <= x1 + 0.2).collect();
-            for w in visible.windows(2) {
-                let (a, b) = (w[0], w[1]);
-                if a[1] > 1e-3 || b[1] > 1e-3 {
-                    let pts = vec![to_screen([a[0], 0.0]), to_screen(*a), to_screen(*b), to_screen([b[0], 0.0])];
-                    painter.add(Shape::convex_polygon(pts, hill, Stroke::new(1.0, hill)));
-                }
-            }
-            let start = to_screen([0.0, 0.0]);
-            painter.line_segment([Pos2::new(start.x, top + 4.0), Pos2::new(start.x, ground_y)], Stroke::new(1.0, Color32::from_white_alpha(40)));
+            draw_track(painter, lane, ground_y, &to_screen, (x0, x1), scale, &r.arena.terrain, k == n - 1 || lane_h > 60.0);
             draw_creatures(painter, &r.arena, &[r.color], &to_screen, scale, 255);
             let d = r.arena.progress(0);
-            painter.text(Pos2::new(rect.left() + 10.0, top + 6.0), Align2::LEFT_TOP, format!("{}  {:.2} m", self.creature(r.entry).name, d), FontId::proportional(14.0), r.color);
+            painter.text(Pos2::new(rect.left() + 10.0, top + 6.0), Align2::LEFT_TOP, format!("{}  {:.2} m", r.name, d), FontId::proportional(14.0), r.color);
         }
         let t = self.race.iter().map(|r| r.arena.time).fold(0.0, f64::max);
         let mut hud = format!("t = {t:.1} / {:.0} s", self.rules.race_time);
@@ -579,8 +652,49 @@ impl App {
     }
 }
 
+/// Whether a race is over (time up or physics broke) or a sumo bout is decided.
+fn finished(a: &Arena, sumo: bool) -> bool {
+    if sumo {
+        a.sumo_status().is_some()
+    } else {
+        a.time >= a.rules.race_time || a.is_broken()
+    }
+}
+
+/// Ground, distance marks, hills and start line of one race lane.
+#[allow(clippy::too_many_arguments)]
+fn draw_track(painter: &egui::Painter, lane: Rect, ground_y: f32, to_screen: &impl Fn([f32; 2]) -> Pos2, (x0, x1): (f32, f32), scale: f32, terrain: &[[f32; 2]], labels: bool) {
+    painter.rect_filled(Rect::from_min_max(Pos2::new(lane.left(), ground_y), Pos2::new(lane.right(), ground_y + lane.height() * 0.06 + 2.0)), 0.0, Color32::from_rgb(110, 90, 65));
+    let label_every = if scale > 40.0 { 1 } else if scale > 15.0 { 5 } else { 10 };
+    for m in (x0.floor() as i32)..=(x1.ceil() as i32) {
+        if m % label_every != 0 {
+            continue;
+        }
+        let x = to_screen([m as f32, 0.0]).x;
+        let tick = if m == 0 { Color32::WHITE } else { Color32::from_gray(150) };
+        painter.line_segment([Pos2::new(x, ground_y), Pos2::new(x, ground_y + 5.0)], Stroke::new(1.0, tick));
+        if labels {
+            painter.text(Pos2::new(x, ground_y + 6.0), Align2::CENTER_TOP, format!("{m} m"), FontId::proportional(10.0), Color32::from_gray(170));
+        }
+    }
+    // Hills: filled columns between the ground line and the terrain surface.
+    let hill = Color32::from_rgb(110, 90, 65);
+    let visible: Vec<&[f32; 2]> = terrain.iter().filter(|p| p[0] >= x0 - 0.2 && p[0] <= x1 + 0.2).collect();
+    for w in visible.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if a[1] > 1e-3 || b[1] > 1e-3 {
+            let pts = vec![to_screen([a[0], 0.0]), to_screen(*a), to_screen(*b), to_screen([b[0], 0.0])];
+            painter.add(Shape::convex_polygon(pts, hill, Stroke::new(1.0, hill)));
+        }
+    }
+    let start = to_screen([0.0, 0.0]);
+    painter.line_segment([Pos2::new(start.x, lane.top() + 4.0), Pos2::new(start.x, ground_y)], Stroke::new(1.0, Color32::from_white_alpha(40)));
+}
+
+/// `alpha` < 255 draws faint ghosts (outline and eye fade too).
 fn draw_creatures(painter: &egui::Painter, arena: &Arena, colors: &[Color32], to_screen: &impl Fn([f32; 2]) -> Pos2, scale: f32, alpha: u8) {
     let mut first_of = vec![true; arena.fighters.len()];
+    let outline = Color32::from_black_alpha((160 * alpha as u16 / 255) as u8);
     for s in arena.segments() {
         let base = colors[s.fighter.min(colors.len() - 1)];
         let fill = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha);
@@ -590,13 +704,13 @@ fn draw_creatures(painter: &egui::Painter, arena: &Arena, colors: &[Color32], to
             to_screen([s.center[0] + lx * cos - ly * sin, s.center[1] + lx * sin + ly * cos])
         };
         let pts = vec![corner(1.0, 1.0), corner(-1.0, 1.0), corner(-1.0, -1.0), corner(1.0, -1.0)];
-        painter.add(Shape::convex_polygon(pts, fill, Stroke::new(1.0, Color32::from_black_alpha(160))));
+        painter.add(Shape::convex_polygon(pts, fill, Stroke::new(1.0, outline)));
         // An eye on the torso so you can tell which way is forward.
         if std::mem::take(&mut first_of[s.fighter]) {
             let r = (s.half[1] * 0.45 * scale).max(2.0);
             let eye = corner(0.6, 0.0);
-            painter.circle_filled(eye, r, Color32::WHITE);
-            painter.circle_filled(eye, r * 0.5, Color32::BLACK);
+            painter.circle_filled(eye, r, Color32::from_white_alpha(alpha));
+            painter.circle_filled(eye, r * 0.5, Color32::from_black_alpha(alpha));
         }
     }
 }
