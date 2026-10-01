@@ -55,14 +55,22 @@ enum Tab {
     Train,
 }
 
-/// The project's creatures folder: designed and trained creatures are saved here.
-fn creatures_dir() -> PathBuf {
-    let built_in = Path::new(env!("CARGO_MANIFEST_DIR")).join("creatures");
-    [PathBuf::from("creatures"), built_in.clone()]
+/// Where to look for one of the arena's folders (`python`, `creatures`), in
+/// order: the current directory, next to this program (the student package),
+/// and the source tree it was built from.
+fn arena_paths(name: &str) -> Vec<PathBuf> {
+    let next_to_exe = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|d| d.join(name)));
+    [Some(PathBuf::from(name)), next_to_exe, Some(Path::new(env!("CARGO_MANIFEST_DIR")).join(name))]
         .into_iter()
-        .find(|d| d.is_dir())
-        .map(|d| std::path::absolute(&d).unwrap_or(d))
-        .unwrap_or(built_in)
+        .flatten()
+        .collect()
+}
+
+/// The creatures folder: designed and trained creatures are saved here.
+fn creatures_dir() -> PathBuf {
+    let paths = arena_paths("creatures");
+    let found = paths.iter().find(|d| d.is_dir()).unwrap_or(&paths[paths.len() - 1]);
+    std::path::absolute(found).unwrap_or_else(|_| found.clone())
 }
 
 /// Whether two paths name the same existing folder.
