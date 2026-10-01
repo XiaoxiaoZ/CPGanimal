@@ -128,7 +128,7 @@ Starting points:
 | File | Purpose |
 |---|---|
 | [`python/ga.py`](python/ga.py) | **The default GA, ready to use** (tournament selection + BLX-α crossover + Gaussian mutation + elitism). Each operator is a separate function, so you can replace just one |
-| [`python/my_ga.py`](python/my_ga.py) | Skeleton for writing a GA from scratch: it runs, but `select` / `crossover` / `mutate` are placeholders (nothing evolves) |
+| [`python/my_ga.py`](python/my_ga.py) | Skeleton for writing your own GA: the same structure, options and output as `ga.py` (including `run()`), but `select` / `crossover` / `mutate` are placeholders, so nothing evolves until you write them |
 | [`python/random_search.py`](python/random_search.py) | Random search baseline: **your GA should beat it with the same number of evaluations (BUDGET)** |
 
 Using the default GA directly:
@@ -154,7 +154,7 @@ best, fitness = ga.run(Problem("creatures/worm.toml"), budget=1000, mutate=my_mu
 # likewise select=... or crossover=..., or tune population / elites / crossover_rate
 ```
 
-Reference results (worm, race, 1000 evaluations): placeholder skeleton 3.6 m, random search 8.1 m, default GA 10.9 m.
+Reference results (worm, race, a budget of 1000 evaluations, default settings): placeholder skeleton `my_ga.py` 3.5 m, random search 7.7 m, default GA 12.6 m. No algorithm uses more than its budget (the GAs stop at 962: a 21st generation would not fit).
 
 #### Training in the GUI: the Train tab
 
@@ -347,6 +347,16 @@ If the assignment is "write a GA from scratch", you can delete `python/ga.py` be
 ```bash
 cargo run --release --example reference_ga -- creatures/worm.toml race 1000 out.toml
 ```
+
+### Handing out the program (Windows)
+
+Students do not need Rust. On Windows, run
+
+```powershell
+powershell -ExecutionPolicy Bypass -File package.ps1
+```
+
+in `arena/`. It builds the programs and puts together `dist/CPG-Arena/` and `dist/CPG-Arena.zip` (about 11 MB): `arena-gui.exe`, `arena.exe`, `python/`, the example creatures (only the files tracked by git), a short guide for students ([`STUDENTS.md`](STUDENTS.md), as `README.md`) and this guide (as `GUIDE.md`). The programs need only Windows' own libraries; students need Python 3.8+ for training. Unzipped anywhere, `arena-gui.exe` finds `python/` and `creatures/` next to itself, and saves new creatures there. For a "write a GA from scratch" assignment, delete `python/ga.py` from the folder before zipping it again (co-evolution and the Train tab's default GA use it).
 
 ---
 

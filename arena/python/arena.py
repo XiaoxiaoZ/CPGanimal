@@ -42,18 +42,20 @@ def _find_binary():
     if os.environ.get("ARENA_BIN"):
         return os.environ["ARENA_BIN"]
     here = Path(__file__).resolve().parent.parent
-    targets = [here / "target"]
+    # A build of this source tree, or the program next to the python folder (the student package).
+    dirs = [here / "target" / "release", here]
     if os.environ.get("CARGO_TARGET_DIR"):
-        targets.insert(0, Path(os.environ["CARGO_TARGET_DIR"]))
-    for target in targets:
+        dirs.insert(0, Path(os.environ["CARGO_TARGET_DIR"]) / "release")
+    for d in dirs:
         for name in ("arena", "arena.exe"):
-            p = target / "release" / name
-            if p.exists():
+            p = d / name
+            if p.is_file():
                 return str(p)
     found = shutil.which("arena")
     if found:
         return found
-    raise FileNotFoundError("arena binary not found: run `cargo build --release` in arena/ or set ARENA_BIN")
+    raise FileNotFoundError("arena binary not found: run `cargo build --release` in arena/, "
+                            "put it next to the python folder, or set ARENA_BIN")
 
 
 class Problem:

@@ -577,10 +577,7 @@ pub struct Trainer {
 
 impl Trainer {
     pub fn new(save_dir: PathBuf) -> Self {
-        let scripts = [PathBuf::from("python"), Path::new(env!("CARGO_MANIFEST_DIR")).join("python")]
-            .into_iter()
-            .find(|d| d.join("arena.py").is_file())
-            .map(|d| absolute(&d));
+        let scripts = super::arena_paths("python").into_iter().find(|d| d.join("arena.py").is_file()).map(|d| absolute(&d));
         let arena_bin = std::env::current_exe()
             .ok()
             .map(|exe| exe.with_file_name(format!("arena{}", std::env::consts::EXE_SUFFIX)))
@@ -641,7 +638,7 @@ impl Trainer {
             let p = PathBuf::from(self.custom.trim());
             return if p.is_file() { Ok(absolute(&p)) } else { Err("Pick your .py script with Browse….".into()) };
         }
-        let dir = self.scripts.as_ref().ok_or("python/ folder not found: start arena-gui from the arena folder.")?;
+        let dir = self.scripts.as_ref().ok_or("python folder not found: keep it next to arena-gui, or start arena-gui from the arena folder.")?;
         Ok(dir.join(self.script.file()))
     }
 
@@ -1644,6 +1641,19 @@ mod tests {
         assert!(g.genomes.len() == g.creatures.len() && g.genomes.iter().all(|x| x.len() == g.setting.genes.len()));
         assert!(t.advance(0.1, 8.0, false));
         assert!(t.replay.as_ref().unwrap().arenas.iter().all(|a| a.fighters.len() == 2 && a.time > 0.0));
+    }
+
+    #[test]
+    #[ignore = "needs Python and a release build of the arena binary"]
+    fn my_ga_runs_like_the_default_ga() {
+        let (t, _) = train("arena-gui-train-my-ga", "worm", |t| {
+            (t.script, t.budget, t.population, t.name, t.extra) = (Script::MyGa, 100, 20, "Worm".into(), "--sigma 0.2".into());
+        });
+        let run = &t.runs[0];
+        assert!(run.status == Status::Done, "{:#?}", run.log);
+        // Same loop and output as ga.py: generation 0 is reported, the budget is never exceeded.
+        assert_eq!(run.points.first().unwrap()[0], 20.0);
+        assert!(run.points.iter().all(|p| p[0] <= 100.0) && run.generations.len() == run.points.len());
     }
 
     #[test]

@@ -27,9 +27,14 @@ args = ap.parse_args()
 
 p = Problem(args.template, mode=args.mode, level=args.level, opponents=args.opponents, rules=args.rules)
 random.seed(args.seed)
+# Start from the template, then try completely random genomes and keep the best.
+# Nothing is learned from earlier tries: this is what a GA has to beat.
 best, best_fit = p.start, p.evaluate([p.start])[0]
 while p.evaluations < args.budget:
-    pop = [[random.random() for _ in range(p.dim)] for _ in range(args.population)]
+    # A batch of random genomes, evaluated in parallel. The last batch is cut
+    # short: never use more than the budget, like the GAs.
+    n = min(args.population, args.budget - p.evaluations)
+    pop = [[random.random() for _ in range(p.dim)] for _ in range(n)]
     for g, f in zip(pop, p.evaluate(pop)):
         if f > best_fit:
             best, best_fit = g, f
