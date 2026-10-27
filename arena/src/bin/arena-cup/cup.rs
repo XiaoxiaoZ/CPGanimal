@@ -1,4 +1,4 @@
-//! Cup tab: a knockout competition for the class. The ticked creatures are
+//! The Cup: a knockout competition for the class. The ticked creatures are
 //! drawn at random into a bracket; every match is one against one (a race
 //! side by side, or a sumo bout) on the environment of one seed, and the
 //! winner goes on to the next round. A creature's file is read from the
@@ -11,12 +11,13 @@
 //! a minute.
 
 use super::environment::{self, Track};
-use super::scene::{self, fit, fit_middle, fitting_font, shadow_text};
+use super::scene::{self, fit, fitting_font, shadow_text};
 use super::sound::{Effect, Sound};
+use super::trophy::trophy;
 use cpg_arena::creature::{Creature, Rules};
 use cpg_arena::sim::{hash01, Arena, SumoResult};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, Vec2};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -30,7 +31,7 @@ const GO: f64 = 0.8;
 const RACE_TIME: f64 = 60.0;
 const GOLD: Color32 = Color32::from_rgb(244, 196, 64);
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Event {
     Race,
@@ -64,24 +65,28 @@ fn field_text(event: Event, seed: u64, rules: &Rules) -> String {
 }
 
 /// FNV-1a of a file's bytes: shows whether it changed after the draw.
-fn fingerprint(path: &Path) -> String {
-    let bytes = std::fs::read(path).unwrap_or_default();
+fn fingerprint(bytes: &[u8]) -> String {
     let h = bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
     format!("{h:016x}")
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Contestant {
     name: String,
     file: PathBuf,
     /// Of the file at the draw.
     fingerprint: String,
-    #[serde(skip)]
-    color: Color32,
+    color: [u8; 3],
+}
+
+impl Contestant {
+    fn color(&self) -> Color32 {
+        Color32::from_rgb(self.color[0], self.color[1], self.color[2])
+    }
 }
 
 /// What decided a match: saved for the teacher, never shown.
-#[derive(Clone, Serialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 struct Outcome {
     winner: String,
     decided_by: String,
@@ -95,7 +100,7 @@ struct Outcome {
     fingerprints: [String; 2],
 }
 
-#[derive(Clone, Serialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 struct SumoRecord {
     reason: String,
     time_s: f64,
@@ -110,8 +115,9 @@ struct Match {
     bye: bool,
     winner: Option<usize>,
     outcome: Option<Outcome>,
-    /// The creatures as played, to watch the match again.
-    played: Option<[Creature; 2]>,
+    /// The two creature files as played (their text), to watch the match
+    /// again, also from the saved results.
+    played: Option<[String; 2]>,
 }
 
 struct Bracket {
@@ -120,11 +126,50 @@ struct Bracket {
     rules: Rules,
     contestants: Vec<Contestant>,
     rounds: Vec<Vec<Match>>,
-    /// Where the results go: `<folder>/cup-results/<stem>.json` and `.csv`.
+    /// The folder of the creatures: the results go to its `cup-results`.
     folder: PathBuf,
-    stem: String,
+    /// The results file (`.json`, and the same name with `.csv`), named when
+    /// the first match is saved: `cup-<event>-<time>.json`.
+    results: Option<PathBuf>,
     drawn_at: String,
-    saved: bool,
+}
+
+/// The saved results of a cup: everything the teacher may want to know,
+/// and everything needed to open the cup again (to watch a match again, or
+/// to go on after the program was closed).
+#[derive(Serialize, Deserialize)]
+struct Report {
+    event: Event,
+    environment_seed: u64,
+    environment: String,
+    drawn_at: String,
+    champion: String,
+    contestants: Vec<Contestant>,
+    rounds: Vec<RoundReport>,
+    rules: Rules,
+    /// The same rules as an `arena.toml`: read back exactly (JSON numbers may not be).
+    rules_toml: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RoundReport {
+    name: String,
+    matches: Vec<MatchReport>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MatchReport {
+    r#match: usize,
+    left: String,
+    right: String,
+    bye: bool,
+    winner: String,
+    /// Indices into `contestants` (left, right; null: nobody) and of the winner.
+    players: [Option<usize>; 2],
+    winner_index: Option<usize>,
+    outcome: Option<Outcome>,
+    /// The two creature files as they were played.
+    creature_files: Option<[String; 2]>,
 }
 
 /// Round names, counted from the final backwards.
@@ -179,13 +224,17 @@ impl Bracket {
             rules: cup_rules(rules, event, seed),
             contestants: entrants
                 .iter()
-                .map(|e| Contestant { name: e.name.clone(), file: e.path.clone(), fingerprint: fingerprint(&e.path), color: e.color })
+                .map(|e| Contestant {
+                    name: e.name.clone(),
+                    file: e.path.clone(),
+                    fingerprint: fingerprint(&std::fs::read(&e.path).unwrap_or_default()),
+                    color: [e.color.r(), e.color.g(), e.color.b()],
+                })
                 .collect(),
             rounds,
             folder: folder.to_path_buf(),
-            stem: format!("cup-{}-{}", if event == Event::Race { "race" } else { "sumo" }, now.format("%Y%m%d-%H%M%S")),
+            results: None,
             drawn_at: now.format("%Y-%m-%d %H:%M:%S").to_string(),
-            saved: false,
         };
         b.advance_winners();
         b
@@ -226,69 +275,97 @@ impl Bracket {
         field_text(self.event, self.seed, &self.rules)
     }
 
-    /// Write the results (all of them, after every match) for the teacher.
-    fn save(&mut self) -> Result<PathBuf, String> {
-        #[derive(Serialize)]
-        struct Row<'a> {
-            r#match: usize,
-            left: String,
-            right: String,
-            bye: bool,
-            winner: String,
-            outcome: Option<&'a Outcome>,
-        }
-        #[derive(Serialize)]
-        struct Round<'a> {
-            name: String,
-            matches: Vec<Row<'a>>,
-        }
-        #[derive(Serialize)]
-        struct Report<'a> {
-            event: Event,
-            environment_seed: u64,
-            environment: String,
-            drawn_at: &'a str,
-            champion: String,
-            contestants: &'a [Contestant],
-            rounds: Vec<Round<'a>>,
-            rules: &'a Rules,
-        }
+    fn report(&self) -> Report {
         let n = self.rounds.len();
         let rounds = self
             .rounds
             .iter()
             .enumerate()
-            .map(|(r, round)| Round {
+            .map(|(r, round)| RoundReport {
                 name: round_name(r, n),
                 matches: round
                     .iter()
                     .enumerate()
-                    .map(|(m, x)| Row {
+                    .map(|(m, x)| MatchReport {
                         r#match: m + 1,
                         left: self.name(x.players[0]),
                         right: self.name(x.players[1]),
                         bye: x.bye,
                         winner: self.name(x.winner),
-                        outcome: x.outcome.as_ref(),
+                        players: x.players,
+                        winner_index: x.winner,
+                        outcome: x.outcome.clone(),
+                        creature_files: x.played.clone(),
                     })
                     .collect(),
             })
             .collect();
-        let report = Report {
+        Report {
             event: self.event,
             environment_seed: self.seed,
             environment: self.environment(),
-            drawn_at: &self.drawn_at,
+            drawn_at: self.drawn_at.clone(),
             champion: self.name(self.champion()),
-            contestants: &self.contestants,
+            contestants: self.contestants.clone(),
             rounds,
-            rules: &self.rules,
+            rules: self.rules.clone(),
+            rules_toml: toml::to_string(&self.rules).unwrap_or_default(),
+        }
+    }
+
+    /// Open a cup saved by `save`: to watch its matches again, or to go on
+    /// with it. Its results keep going to the same file.
+    fn open(path: &Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let report: Report = serde_json::from_str(&text).map_err(|e| format!("{} is not a saved cup that this program can open: {e}", path.display()))?;
+        let rules: Rules = toml::from_str(&report.rules_toml).map_err(|e| format!("{}: {e}", path.display()))?;
+        let rounds: Vec<Vec<Match>> = report
+            .rounds
+            .into_iter()
+            .map(|round| {
+                round
+                    .matches
+                    .into_iter()
+                    .map(|m| Match { players: m.players, bye: m.bye, winner: m.winner_index, outcome: m.outcome, played: m.creature_files })
+                    .collect()
+            })
+            .collect();
+        // A knockout (every round half the one before, down to the final)
+        // between the contestants of the file.
+        let n = report.contestants.len();
+        let shape = rounds.last().is_some_and(|r| r.len() == 1) && rounds.windows(2).all(|w| w[0].len() == 2 * w[1].len());
+        let players = rounds.iter().flatten().all(|m| {
+            m.players.iter().flatten().all(|&i| i < n) && m.winner.is_none_or(|w| m.players.contains(&Some(w))) && (m.outcome.is_none() || m.played.is_some())
+        });
+        if !shape || !players {
+            return Err(format!("{}: the bracket in this file is broken", path.display()));
+        }
+        let mut b = Self {
+            event: report.event,
+            seed: report.environment_seed,
+            rules,
+            contestants: report.contestants,
+            rounds,
+            folder: path.parent().and_then(Path::parent).map_or_else(PathBuf::new, Path::to_path_buf),
+            results: Some(path.to_path_buf()),
+            drawn_at: report.drawn_at,
         };
-        let dir = self.folder.join("cup-results");
-        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let json = dir.join(format!("{}.json", self.stem));
+        b.advance_winners();
+        Ok(b)
+    }
+
+    /// Write the results (all of them, after every match) for the teacher.
+    fn save(&mut self) -> Result<PathBuf, String> {
+        let report = self.report();
+        let event = if self.event == Event::Race { "race" } else { "sumo" };
+        let name = format!("cup-{event}-{}.json", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+        let json = self.results.get_or_insert_with(|| self.folder.join("cup-results").join(name)).clone();
+        if let Some(dir) = json.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
         let text = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
         std::fs::write(&json, text).map_err(|e| format!("{}: {e}", json.display()))?;
+        let n = self.rounds.len();
         // The same as a table, for a spreadsheet.
         let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
         let num = |v: Option<f64>| v.map_or(String::new(), |v| format!("{v:.4}"));
@@ -315,9 +392,8 @@ impl Bracket {
                 );
             }
         }
-        let csv_path = dir.join(format!("{}.csv", self.stem));
+        let csv_path = json.with_extension("csv");
         std::fs::write(&csv_path, csv).map_err(|e| format!("{}: {e}", csv_path.display()))?;
-        self.saved = true;
         Ok(json)
     }
 }
@@ -370,8 +446,8 @@ struct Show {
     event: Event,
     names: [String; 2],
     colors: [Color32; 2],
-    creatures: [Creature; 2],
-    fingerprints: [String; 2],
+    /// The two creature files as played.
+    files: [String; 2],
     arenas: Vec<Arena>,
     phase: Phase,
     /// Real seconds in this phase (simulated seconds while running).
@@ -386,15 +462,44 @@ struct Show {
     excitement: f32,
 }
 
+/// Who won the match on screen (side 0 or 1), why, and what decided it:
+/// the distances of a race, or how a bout ended. A tie goes to a coin toss
+/// that depends only on the cup's seed and the match.
+fn decide(show: &Show, seed: u64) -> (usize, String, Option<[Option<f64>; 2]>, Option<SumoRecord>) {
+    let coin = usize::from(hash01((show.round * 1024 + show.index) as i64, seed ^ 0xC0FFEE) >= 0.5);
+    match show.event {
+        Event::Race => {
+            let d: Vec<Option<f64>> = show.arenas.iter().map(|a| (!a.is_broken()).then(|| a.progress(0))).collect();
+            let (w, why) = race_winner([d[0], d[1]], coin);
+            (w, why, Some([d[0], d[1]]), None)
+        }
+        Event::Sumo => {
+            let a = &show.arenas[0];
+            let r = a.sumo_status().unwrap_or(SumoResult { winner: None, time: a.time, reason: "time up".into(), margin: 0.0 });
+            let (w, why) = sumo_winner(&r, coin);
+            (w, why, None, Some(SumoRecord { reason: r.reason.clone(), time_s: r.time, margin: r.margin }))
+        }
+    }
+}
+
+/// Whether a race is over (time up or physics broke) or a sumo bout is decided.
+fn finished(a: &Arena, sumo: bool) -> bool {
+    if sumo {
+        a.sumo_status().is_some()
+    } else {
+        a.time >= a.rules.race_time || a.is_broken()
+    }
+}
+
 impl Show {
     fn done(&self) -> bool {
-        self.arenas.iter().all(|a| super::finished(a, self.event == Event::Sumo))
+        self.arenas.iter().all(|a| finished(a, self.event == Event::Sumo))
     }
 
     fn step_all(&mut self) {
         let sumo = self.event == Event::Sumo;
         for a in &mut self.arenas {
-            if !super::finished(a, sumo) {
+            if !finished(a, sumo) {
                 a.step();
             }
         }
@@ -446,14 +551,47 @@ pub struct Cup {
     bracket: Option<Bracket>,
     show: Option<Show>,
     sound: Sound,
-    confirm_new: bool,
     /// The last error or note, and whether it is an error.
     message: Option<(String, bool)>,
 }
 
 impl Cup {
     pub fn new() -> Self {
-        Self { event: Event::Race, seed: environment::new_seed(), bracket: None, show: None, sound: Sound::new(), confirm_new: false, message: None }
+        Self { event: Event::Race, seed: environment::new_seed(), bracket: None, show: None, sound: Sound::new(), message: None }
+    }
+
+    /// Once a match is played, the draw is fixed until the cup has its champion.
+    fn draw_fixed(&self) -> bool {
+        self.bracket.as_ref().is_some_and(|b| b.started() && b.champion().is_none())
+    }
+
+    /// Pick a saved cup (in the folder's cup-results) and open it.
+    fn open_saved(&mut self, folder: &Path) {
+        let mut dialog = rfd::FileDialog::new().set_title("Open a saved cup").add_filter("saved cup", &["json"]);
+        let dir = folder.join("cup-results");
+        if dir.is_dir() {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(path) = dialog.pick_file() {
+            self.open(&path);
+        }
+    }
+
+    fn open(&mut self, path: &Path) {
+        match Bracket::open(path) {
+            Ok(b) => {
+                let played = b.rounds.iter().flatten().filter(|m| m.outcome.is_some()).count();
+                let matches = b.rounds.iter().flatten().filter(|m| !m.bye).count();
+                let name = path.file_name().map_or_else(String::new, |f| f.to_string_lossy().into_owned());
+                self.message = Some((format!("Opened {name}: {played} of {matches} matches played."), false));
+                (self.event, self.seed) = (b.event, b.seed);
+                self.bracket = Some(b);
+                self.show = None;
+                self.sound.stop();
+                self.sound.prepare();
+            }
+            Err(e) => self.message = Some((e, true)),
+        }
     }
 
     fn new_draw(&mut self, entrants: &[Entrant], folder: &Path, rules: &Rules) {
@@ -462,6 +600,7 @@ impl Cup {
         self.show = None;
         self.message = None;
         self.sound.stop();
+        self.sound.prepare();
     }
 
     /// Space / Enter: play the next match, or once the winner is announced,
@@ -485,42 +624,46 @@ impl Cup {
         }
     }
 
-    /// Leaving the tab: let the sound fade.
-    pub fn leave(&mut self) {
-        self.sound.stop();
-    }
-
-    /// Start (or watch again) match `m` of round `r`, reading the creature files now.
+    /// Start match `m` of round `r`, reading the creature files now; or watch
+    /// a played match again, with the creatures as they were played.
     fn start(&mut self, r: usize, m: usize) {
         let Some(b) = &self.bracket else { return };
         let x = &b.rounds[r][m];
         let [Some(p0), Some(p1)] = x.players else { return };
-        let load = |c: &Contestant| -> Result<(Creature, String), String> {
-            let creature = Creature::load(&c.file).map_err(|e| format!("{}: {e}", c.name))?;
-            creature.validate(&b.rules).map_err(|e| format!("{} breaks the rules: {}", c.name, e.join("; ")))?;
-            Ok((creature, fingerprint(&c.file)))
+        let read = |c: &Contestant| std::fs::read_to_string(&c.file).map_err(|e| format!("{}: {e}", c.name));
+        let files = match (&x.played, x.outcome.is_some()) {
+            (Some(f), true) => Ok(f.clone()),
+            _ => read(&b.contestants[p0]).and_then(|a| Ok([a, read(&b.contestants[p1])?])),
         };
-        let (creatures, fingerprints, replay) = match (&x.played, &x.outcome) {
-            (Some(c), Some(o)) => (c.clone(), o.fingerprints.clone(), Some(usize::from(x.winner != Some(p0)))),
-            _ => match (load(&b.contestants[p0]), load(&b.contestants[p1])) {
-                (Ok((a, fa)), Ok((c, fc))) => ([a, c], [fa, fc], None),
-                (Err(e), _) | (_, Err(e)) => {
-                    self.message = Some((format!("Could not load the match: {e}"), true));
-                    return;
-                }
-            },
+        let replay = x.outcome.is_some().then(|| usize::from(x.winner != Some(p0)));
+        let parse = |c: &Contestant, text: &str| -> Result<Creature, String> {
+            let creature: Creature = toml::from_str(text).map_err(|e| format!("{}: {e}", c.name))?;
+            creature.validate(&b.rules).map_err(|e| format!("{} breaks the rules: {}", c.name, e.join("; ")))?;
+            Ok(creature)
+        };
+        let loaded = files.and_then(|f| Ok(([parse(&b.contestants[p0], &f[0])?, parse(&b.contestants[p1], &f[1])?], f)));
+        let (creatures, files) = match loaded {
+            Ok(l) => l,
+            Err(e) => {
+                self.message = Some((format!("Could not load the match: {e}"), true));
+                return;
+            }
         };
         let rules = &b.rules;
         let arenas = match b.event {
             Event::Race => vec![Arena::race(&creatures[0], rules), Arena::race(&creatures[1], rules)],
             Event::Sumo => vec![Arena::sumo(&creatures[0], &creatures[1], rules)],
         };
-        let mut colors = [b.contestants[p0].color, b.contestants[p1].color];
+        let mut colors = [b.contestants[p0].color(), b.contestants[p1].color()];
         if colors[0] == colors[1] {
             colors[1] = Color32::from_rgb(255 - colors[0].r() / 2, 255 - colors[0].g() / 2, 255 - colors[0].b() / 2);
         }
-        let changed: Vec<&str> =
-            [p0, p1].iter().zip(&fingerprints).filter(|(p, f)| b.contestants[**p].fingerprint != **f).map(|(p, _)| b.contestants[*p].name.as_str()).collect();
+        let changed: Vec<&str> = [p0, p1]
+            .iter()
+            .zip(&files)
+            .filter(|(p, f)| b.contestants[**p].fingerprint != fingerprint(f.as_bytes()))
+            .map(|(p, _)| b.contestants[*p].name.as_str())
+            .collect();
         self.message = (!changed.is_empty() && replay.is_none()).then(|| (format!("Changed since the draw: {} (the file as it is now is used)", changed.join(", ")), false));
         self.show = Some(Show {
             round: r,
@@ -528,8 +671,7 @@ impl Cup {
             event: b.event,
             names: [b.contestants[p0].name.clone(), b.contestants[p1].name.clone()],
             colors,
-            creatures,
-            fingerprints,
+            files,
             arenas,
             phase: Phase::Countdown,
             clock: 0.0,
@@ -552,20 +694,7 @@ impl Cup {
             Some(w) => w,
             None => {
                 let Some(b) = &mut self.bracket else { return };
-                let coin = usize::from(hash01((show.round * 1024 + show.index) as i64, b.seed ^ 0xC0FFEE) >= 0.5);
-                let (side, decided_by, distances, sumo) = match show.event {
-                    Event::Race => {
-                        let d: Vec<Option<f64>> = show.arenas.iter().map(|a| (!a.is_broken()).then(|| a.progress(0))).collect();
-                        let (w, why) = race_winner([d[0], d[1]], coin);
-                        (w, why, Some([d[0], d[1]]), None)
-                    }
-                    Event::Sumo => {
-                        let a = &show.arenas[0];
-                        let r = a.sumo_status().unwrap_or(SumoResult { winner: None, time: a.time, reason: "time up".into(), margin: 0.0 });
-                        let (w, why) = sumo_winner(&r, coin);
-                        (w, why, None, Some(SumoRecord { reason: r.reason.clone(), time_s: r.time, margin: r.margin }))
-                    }
-                };
+                let (side, decided_by, distances, sumo) = decide(show, b.seed);
                 let x = &mut b.rounds[show.round][show.index];
                 x.winner = x.players[side];
                 x.outcome = Some(Outcome {
@@ -574,9 +703,9 @@ impl Cup {
                     distances_m: distances,
                     sumo,
                     played_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-                    fingerprints: show.fingerprints.clone(),
+                    fingerprints: [fingerprint(show.files[0].as_bytes()), fingerprint(show.files[1].as_bytes())],
                 });
-                x.played = Some(show.creatures.clone());
+                x.played = Some(show.files.clone());
                 b.advance_winners();
                 self.message = match b.save() {
                     Ok(_) => None,
@@ -732,32 +861,23 @@ impl Cup {
                 .weak(),
         );
         if locked {
-            ui.label(RichText::new("The cup has started: its event and field are fixed. A new draw starts a new cup.").small().weak());
+            ui.label(RichText::new("The cup has started: its event and field are fixed.").small().weak());
         }
         ui.separator();
 
         ui.label(format!("Competitors: the {} creatures ticked on the left.", entrants.len()));
-        let can_draw = entrants.len() >= 2 && self.show.is_none();
-        if self.confirm_new {
-            ui.colored_label(ui.visuals().warn_fg_color, "Start a new cup? This cup's results stay saved in its file.");
-            ui.horizontal(|ui| {
-                if ui.button("New draw").clicked() {
-                    self.new_draw(entrants, folder, rules);
-                    self.confirm_new = false;
-                }
-                if ui.button("Cancel").clicked() {
-                    self.confirm_new = false;
-                }
-            });
-        } else if ui.add_enabled(can_draw, egui::Button::new("Random draw")).on_hover_text("Draw the ticked creatures into a new bracket, at random").clicked() {
-            if locked {
-                self.confirm_new = true;
-            } else {
-                self.new_draw(entrants, folder, rules);
-            }
+        let fixed = self.draw_fixed();
+        let can_draw = entrants.len() >= 2 && self.show.is_none() && !fixed;
+        if ui.add_enabled(can_draw, egui::Button::new("Random draw")).on_hover_text("Draw the ticked creatures into a new bracket, at random").clicked() {
+            self.new_draw(entrants, folder, rules);
         }
-        if entrants.len() < 2 {
+        if fixed {
+            ui.label(RichText::new("Matches have been played: the draw is fixed until the cup has its champion.").small().weak());
+        } else if entrants.len() < 2 {
             ui.label(RichText::new("Tick at least two creatures.").small().weak());
+        }
+        if ui.add_enabled(self.show.is_none(), egui::Button::new("Open a saved cup…")).on_hover_text("A cup from cup-results: watch its matches again, or go on with it").clicked() {
+            self.open_saved(folder);
         }
 
         let mut play = None;
@@ -777,11 +897,16 @@ impl Cup {
                 }
                 (None, Some(c)) => {
                     ui.label(RichText::new(format!("Champion: {}", b.contestants[c].name)).strong().color(GOLD));
+                    ui.label(RichText::new("Click a match in the bracket to watch it again.").small().weak());
                 }
                 (None, None) => {}
             }
-            if b.saved {
-                ui.label(RichText::new("The detailed results are saved for the teacher in the folder's cup-results, and never shown here.").small().weak());
+            if let Some(file) = b.results.as_ref().and_then(|p| p.file_name()) {
+                let text = format!(
+                    "Every match is saved when it ends, in cup-results/{} with the creatures as they were played: the detailed results for the teacher (never shown here), and the matches to watch again, also after closing the program (Open a saved cup…).",
+                    file.to_string_lossy()
+                );
+                ui.label(RichText::new(text).small().weak());
             }
         }
         if let Some((r, m)) = play {
@@ -901,7 +1026,7 @@ impl Cup {
             // The trophy, and the champion under it.
             let fin = pos(n - 1, 0);
             let tc = Pos2::new(area.right() + 84.0, fin.center().y - 30.0);
-            scene::trophy(&painter, tc, 80.0);
+            trophy(&painter, tc, 80.0);
             let champ = b.champion().map_or("?".to_string(), |c| b.contestants[c].name.clone());
             shadow_text(&painter, tc + Vec2::new(0.0, 62.0), Align2::CENTER_TOP, champ, scene::display(18.0), if b.champion().is_some() { GOLD } else { Color32::from_gray(150) });
         });
@@ -983,7 +1108,7 @@ impl Cup {
                 let pop = (show.clock as f32 / 0.35).min(1.0);
                 let ease = 1.0 - (1.0 - pop).powi(3);
                 if show.last_match {
-                    scene::trophy(&painter, center - Vec2::new(0.0, 120.0 * ease), 120.0 * ease.max(0.01));
+                    trophy(&painter, center - Vec2::new(0.0, 120.0 * ease), 120.0 * ease.max(0.01));
                     shadow_text(&painter, center + Vec2::new(0.0, 4.0), Align2::CENTER_BOTTOM, "CHAMPION OF THE CUP", scene::display(26.0), GOLD);
                 }
                 banner(&painter, center + Vec2::new(0.0, 60.0), (rect.width() * 0.62).min(680.0) * ease, &show.names[w], show.colors[w], !show.last_match);
@@ -1004,6 +1129,24 @@ impl Cup {
         if show.phase == Phase::Reveal && resp.clicked() {
             self.back();
         }
+    }
+}
+
+/// `text` shortened in the middle with "…" to fit in `max` pixels: the end
+/// often tells similar names apart ("My Worm (ga 12:20:01)").
+fn fit_middle(painter: &egui::Painter, text: &str, font: &FontId, max: f32) -> String {
+    let width = |s: &str| painter.layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE).size().x;
+    if width(text) <= max {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let (mut head, mut tail) = ((chars.len() + 1) / 2, chars.len() / 2);
+    loop {
+        let s: String = chars[..head].iter().chain(['…'].iter()).chain(chars[chars.len() - tail..].iter()).collect();
+        if width(&s) <= max || head + tail == 0 {
+            return s;
+        }
+        if head > tail { head -= 1 } else { tail -= 1 }
     }
 }
 
@@ -1034,7 +1177,7 @@ fn card_shape(painter: &egui::Painter, rc: Rect, b: &Bracket, x: &Match, next: b
                 let won = x.winner == Some(p) && !x.bye;
                 let lost = x.winner.is_some() && x.winner != Some(p);
                 let chip = Rect::from_center_size(Pos2::new(row.left() + 14.0, y), Vec2::splat(12.0));
-                painter.rect_filled(chip, 3.0, if lost { c.color.gamma_multiply(0.35) } else { c.color });
+                painter.rect_filled(chip, 3.0, if lost { c.color().gamma_multiply(0.35) } else { c.color() });
                 let font = if won { scene::display(13.0) } else { FontId::proportional(13.0) };
                 let color = if won { Color32::WHITE } else if lost { Color32::from_gray(110) } else { Color32::from_gray(225) };
                 let name = fit_middle(painter, &c.name, &font, row.width() - 48.0);
@@ -1072,7 +1215,7 @@ fn banner(painter: &egui::Painter, center: Pos2, width: f32, name: &str, color: 
         painter.add(Shape::convex_polygon(vec![tail[2], tail[3], tail[4]], dark, Stroke::NONE));
     }
     painter.rect_filled(band.translate(Vec2::new(0.0, 6.0)), 6.0, Color32::from_black_alpha(90));
-    scene::gradient_rect(painter, band, scene::mix(color, Color32::WHITE, 0.25), scene::mix(color, Color32::BLACK, 0.25));
+    scene::gradient(painter, band, &[(0.0, scene::mix(color, Color32::WHITE, 0.25)), (1.0, scene::mix(color, Color32::BLACK, 0.25))]);
     painter.rect_stroke(band, 4.0, Stroke::new(3.0, GOLD), StrokeKind::Inside);
     if label {
         shadow_text(painter, band.center_top() + Vec2::new(0.0, 8.0), Align2::CENTER_TOP, "WINNER", FontId::proportional(14.0), Color32::WHITE);
@@ -1189,8 +1332,8 @@ mod tests {
         assert_eq!(toml::to_string(&sumo).unwrap(), toml::to_string(&choice.rules(&folder)).unwrap());
     }
 
-    /// Play a whole cup without the screen: every match skipped to its result.
-    fn play_cup(event: Event, dir_name: &str) -> (Cup, PathBuf) {
+    /// A drawn cup of worm, walker and tailfin (copied to a new folder), not played yet.
+    fn draw_cup(event: Event, dir_name: &str) -> (Cup, PathBuf) {
         let dir = std::env::temp_dir().join(dir_name);
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
@@ -1205,7 +1348,13 @@ mod tests {
         (cup.event, cup.seed) = (event, 4711);
         let rules = Rules { race_time: 5.0, sumo_time: 5.0, ..Rules::default() };
         cup.new_draw(&list, &dir, &rules);
-        while let Some((r, m)) = cup.bracket.as_ref().unwrap().next() {
+        (cup, dir)
+    }
+
+    /// Play up to `n` matches without the screen, each skipped to its result.
+    fn play(cup: &mut Cup, n: usize) {
+        for _ in 0..n {
+            let Some((r, m)) = cup.bracket.as_ref().unwrap().next() else { return };
             cup.start(r, m);
             assert!(cup.show.is_some(), "{:?}", cup.message);
             cup.skip();
@@ -1214,7 +1363,17 @@ mod tests {
             assert_eq!(cup.show.as_ref().unwrap().phase, Phase::Reveal);
             cup.back();
         }
+    }
+
+    /// Play a whole cup.
+    fn play_cup(event: Event, dir_name: &str) -> (Cup, PathBuf) {
+        let (mut cup, dir) = draw_cup(event, dir_name);
+        play(&mut cup, usize::MAX);
         (cup, dir)
+    }
+
+    fn results(cup: &Cup) -> PathBuf {
+        cup.bracket.as_ref().unwrap().results.clone().expect("saved")
     }
 
     #[test]
@@ -1249,13 +1408,16 @@ mod tests {
 
     #[test]
     fn a_race_cup_is_played_to_the_end_and_the_data_is_saved() {
-        let (cup, dir) = play_cup(Event::Race, "arena-gui-cup-race");
+        let (cup, dir) = play_cup(Event::Race, "arena-cup-race");
         let b = cup.bracket.as_ref().unwrap();
         let champion = b.champion().expect("a champion");
         // 3 creatures: one bye, then two matches.
         let played: Vec<&Match> = b.rounds.iter().flatten().filter(|m| m.outcome.is_some()).collect();
         assert_eq!(played.len(), 2);
-        let json = std::fs::read_to_string(dir.join("cup-results").join(format!("{}.json", b.stem))).unwrap();
+        let saved = results(&cup);
+        assert_eq!(saved.parent().unwrap(), dir.join("cup-results"));
+        assert!(saved.file_name().unwrap().to_string_lossy().starts_with("cup-race-"));
+        let json = std::fs::read_to_string(&saved).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["champion"], b.contestants[champion].name);
         assert_eq!(v["environment_seed"], 4711);
@@ -1266,18 +1428,21 @@ mod tests {
         let d = [o["distances_m"][0].as_f64().unwrap(), o["distances_m"][1].as_f64().unwrap()];
         let final_match = &b.rounds[1][0];
         assert_eq!(final_match.winner, final_match.players[if d[0] > d[1] { 0 } else { 1 }]);
-        let csv = std::fs::read_to_string(dir.join("cup-results").join(format!("{}.csv", b.stem))).unwrap();
+        // The creature files as played, for watching the match again.
+        let files = &v["rounds"][1]["matches"][0]["creature_files"];
+        assert!(files[0].as_str().unwrap().contains("[[segment]]"), "{files}");
+        let csv = std::fs::read_to_string(saved.with_extension("csv")).unwrap();
         assert_eq!(csv.lines().count(), 3, "{csv}");
         assert!(csv.lines().nth(2).unwrap().starts_with("\"Final\",1,"));
     }
 
     #[test]
     fn a_sumo_cup_on_hills_is_played_to_the_end() {
-        let (cup, dir) = play_cup(Event::Sumo, "arena-gui-cup-sumo");
+        let (cup, _) = play_cup(Event::Sumo, "arena-cup-sumo");
         let b = cup.bracket.as_ref().unwrap();
         assert!(b.champion().is_some());
         assert!(b.rules.terrain_roughness > 0.0);
-        let json = std::fs::read_to_string(dir.join("cup-results").join(format!("{}.json", b.stem))).unwrap();
+        let json = std::fs::read_to_string(results(&cup)).unwrap();
         assert!(json.contains("\"sumo\"") && json.contains("\"margin\""), "{json}");
         // Watching a match again shows the same winner and changes nothing.
         let mut cup = cup;
@@ -1288,5 +1453,81 @@ mod tests {
         cup.skip();
         let side = cup.show.as_ref().unwrap().winner.unwrap();
         assert_eq!(cup.bracket.as_ref().unwrap().rounds[r][m].players[side], before);
+    }
+
+    #[test]
+    fn the_draw_is_fixed_once_a_match_is_played() {
+        let (mut cup, _) = draw_cup(Event::Race, "arena-cup-fixed");
+        assert!(!cup.draw_fixed(), "a new draw may be redrawn");
+        play(&mut cup, 1);
+        assert!(cup.draw_fixed(), "after the first match");
+        play(&mut cup, 1);
+        assert!(cup.bracket.as_ref().unwrap().champion().is_some());
+        assert!(!cup.draw_fixed(), "the cup is over: a new cup may be drawn");
+    }
+
+    #[test]
+    fn a_saved_cup_opens_again_and_its_matches_replay_the_same() {
+        for (event, dir_name) in [(Event::Race, "arena-cup-reopen-race"), (Event::Sumo, "arena-cup-reopen-sumo")] {
+            let (cup, dir) = play_cup(event, dir_name);
+            // The students' files are gone after the cup: the saved files are used.
+            for c in ["worm", "walker", "tailfin"] {
+                std::fs::remove_file(dir.join(format!("{c}.toml"))).unwrap();
+            }
+            let mut again = Cup::new();
+            again.sound.on = false;
+            again.open(&results(&cup));
+            let (a, b) = (cup.bracket.as_ref().unwrap(), again.bracket.as_ref().expect("opened"));
+            assert_eq!((b.event, b.seed, b.champion()), (a.event, a.seed, a.champion()));
+            assert_eq!(toml::to_string(&b.rules).unwrap(), toml::to_string(&a.rules).unwrap());
+            assert!(!again.draw_fixed() && b.next().is_none());
+            // Every played match, simulated again from the saved files, has the same winner.
+            let played: Vec<(usize, usize, Option<usize>)> =
+                b.rounds.iter().enumerate().flat_map(|(r, round)| round.iter().enumerate().filter(|(_, x)| x.outcome.is_some()).map(move |(m, x)| (r, m, x.winner))).collect();
+            assert_eq!(played.len(), 2);
+            for (r, m, winner) in played {
+                again.start(r, m);
+                assert!(again.show.is_some(), "{:?}", again.message);
+                let show = again.show.as_mut().unwrap();
+                while !show.done() {
+                    show.step_all();
+                }
+                let side = decide(show, again.bracket.as_ref().unwrap().seed).0;
+                assert_eq!(again.bracket.as_ref().unwrap().rounds[r][m].players[side], winner, "{event:?}, round {r} match {m}");
+                again.back();
+            }
+        }
+    }
+
+    #[test]
+    fn an_unfinished_cup_goes_on_where_it_stopped() {
+        let (mut cup, _) = draw_cup(Event::Race, "arena-cup-resume");
+        play(&mut cup, 1);
+        let saved = results(&cup);
+        // The program is closed and opened again.
+        let mut again = Cup::new();
+        again.sound.on = false;
+        again.open(&saved);
+        assert!(again.draw_fixed(), "{:?}", again.message);
+        assert_eq!(again.bracket.as_ref().unwrap().next(), cup.bracket.as_ref().unwrap().next());
+        play(&mut again, 1);
+        // The final goes to the same file.
+        assert_eq!(results(&again), saved);
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+        let champion = again.bracket.as_ref().unwrap().champion().expect("a champion");
+        assert_eq!(v["champion"], again.bracket.as_ref().unwrap().contestants[champion].name);
+        assert!(again.message.is_none(), "{:?}", again.message);
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_saved_cup_is_refused() {
+        let dir = std::env::temp_dir().join("arena-cup-not-a-cup");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("other.json");
+        std::fs::write(&path, "{\"event\": \"race\"}").unwrap();
+        let mut cup = Cup::new();
+        cup.open(&path);
+        assert!(cup.bracket.is_none());
+        assert!(cup.message.as_ref().is_some_and(|(m, error)| *error && m.contains("not a saved cup")), "{:?}", cup.message);
     }
 }
