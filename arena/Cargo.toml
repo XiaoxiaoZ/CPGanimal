@@ -6,8 +6,10 @@ description = "Evolve CPG-driven 2D creatures with a genetic algorithm, then rac
 license = "MIT"
 
 [features]
-default = ["gui"]
+default = ["gui", "sound"]
 gui = ["dep:eframe", "dep:rfd", "dep:chrono"]
+# Sound effects in the Cup tab (needs ALSA on Linux).
+sound = ["dep:cpal"]
 
 [dependencies]
 rapier2d = "0.35"
@@ -19,6 +21,7 @@ clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.35", optional = true, default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
 rfd = { version = "0.17", optional = true }
 chrono = { version = "0.4", optional = true, default-features = false, features = ["clock"] }
+cpal = { version = "0.18", optional = true }
 
 [[bin]]
 name = "arena-gui"

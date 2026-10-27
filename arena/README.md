@@ -304,6 +304,7 @@ p.save(&best, "me.toml".as_ref(), Some("My Champion"))?;
 ./target/release/arena-gui class              # GUI: tick creatures -> Start race / Tournament
 ./target/release/arena-gui class --race       # start the race on launch (for the projector)
 ./target/release/arena-gui class --tournament # start the sumo round robin on launch, then replay the final
+./target/release/arena-gui class --cup --fullscreen # open the Cup full screen, for the projector
 ./target/release/arena race class             # leaderboard on the command line
 ./target/release/arena tournament class       # sumo round robin on the command line
 ./target/release/arena check class            # check that every file follows the rules
@@ -312,6 +313,16 @@ p.save(&best, "me.toml".as_ref(), Some("My Champion"))?;
 Without a folder argument the GUI opens `creatures` (creatures made in the Design and Train tabs are saved there too); pick another folder with **Browse…** at the top. The GUI checks the folder every second and reloads when files are added or changed. Files that break the rules are listed on the left in red, with the reason.
 
 The Race and Train tabs run on **flat** ground, on the **class track** (shown instead of "flat" when the open folder has an `arena.toml`: the teacher's track), or on an **environment seed**: one number (0 to 9999) from which the hills, the terrain, the slope and the friction are generated. The same seed always gives the same track, so a class can train for and race on "environment 4711"; both tabs show the track before they start. In the Race tab, tick "a new environment for every race" to get a surprise track each time, a quick test of how well creatures generalise. For sumo, the same seed puts its hills on the platform, mirrored so that both sides are equal, and sets the friction (there is no slope in sumo: it would favour one side).
+
+#### The Cup: a knockout competition
+
+The **Cup** tab runs the class competition. Choose race or sumo, press **New field** for a random environment seed, tick the competitors on the left (for example, open the class folder with the students' files) and press **Random draw**: the creatures are drawn at random into a knockout bracket (with a number that is not a power of two, some get a bye through the first round). Click a match in the bracket, or **Play the next match**: the two creature files are read from the folder at that moment, and the match is one against one, a race side by side on the same track or a sumo bout. The winner goes on to the next round, until the final crowns the champion.
+
+- **The field**: one environment seed for the whole cup, so the students cannot know it in advance; it is fixed once the first match is played. The physics are exactly those of training: the same simulator and the same environment as that seed in the Train tab. Races last a minute (60 s, instead of `race_time`), so the terrain matters more.
+- **Only the winner is announced.** No distances, scores or times are shown during the cup, and the creature list hides the training fitness while the Cup tab is open: if the class could compare numbers, the suspense would be gone. A race tie (very rare) and a sumo draw are decided without showing it: ring control (nearer the centre), else a coin toss.
+- **The data is saved** for the teacher after every match, in `cup-results/` in the folder: `cup-<event>-<date>-<time>.json` (the draw, the field and its rules, every match with what decided it: distances, how a bout ended, its time and ring control, and a fingerprint of each creature file) and a `.csv` table of the matches. If students can read the class folder, keep a copy of their files somewhere else for the cup, so they cannot open the results.
+- **Show**: a countdown with beeps, the crowd in the stands, a drum roll before the winner is announced, a fanfare, confetti, and a trophy for the champion. Untick **Sound** to play without it. **Skip** jumps to the result (the match is still fully simulated); a played match can be watched again by clicking it.
+- **Full screen** (button in the top bar, or F11): only the arena fills the screen, for the projector; Esc leaves it. Prepare the draw first. Then click a match, or press **Space** (or Enter) for the next match and, after the winner is announced, to go back to the bracket; **S** skips to the result. Moving the mouse shows a reminder of the keys.
 
 ---
 
@@ -378,10 +389,12 @@ arena/
 │       ├── arena.rs      # command line (info / eval / batch / fight / save / judge / rules / convert / check / race / tournament)
 │       └── arena-gui/    # GUI (eframe/egui)
 │           ├── main.rs   # creature list, race, sumo
+│           ├── cup.rs    # Cup tab: knockout competition, random draw, results saved for the teacher
 │           ├── design.rs # Design tab: build a creature from blocks, try it, save it
 │           ├── environment.rs # environment seeds: a whole track from one number; track and platform previews
 │           ├── python.rs # finds Python on the computer for the Train tab
-│           ├── scene.rs  # the look: sky, stands, textured ground, shaded creatures, sumo ring (drawing only)
+│           ├── scene.rs  # the look: sky, stands, textured ground, shaded creatures, sumo ring, trophy (drawing only)
+│           ├── sound.rs  # synthesised sound effects for the Cup (cpal; `--no-default-features --features gui` builds without)
 │           └── train.rs  # Train tab: runs the Python training scripts, plots fitness curves, replays populations
 ├── python/           # arena.py interface, ga.py default GA, my_ga.py skeleton, random_search.py baseline,
 │                     # evolve_structure.py structure evolution, coevolve.py co-evolution, generalize.py generalisation experiment

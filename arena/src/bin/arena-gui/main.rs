@@ -1,16 +1,19 @@
 //! Arena viewer: loads a folder of creature files and shows races and sumo bouts.
 //!
-//! Usage: `arena-gui [folder] [--race | --tournament]` (default folder
-//! `creatures`; the flags start that event right away). Another folder can be
+//! Usage: `arena-gui [folder] [--race | --tournament | --cup] [--fullscreen]`
+//! (default folder `creatures`; the flags start that event right away, or open
+//! the Cup tab, and fill the screen: F11 or Esc to leave). Another folder can be
 //! picked with Browse… in the top bar. Files are reloaded automatically when
 //! they change, so students can train in a terminal (or in the Train tab) and
 //! watch the result appear. Creatures made in the Design and Train tabs are
 //! saved to the creatures folder.
 
+mod cup;
 mod design;
 mod environment;
 mod python;
 mod scene;
+mod sound;
 mod train;
 
 use cpg_arena::creature::{Creature, Rules};
@@ -43,8 +46,12 @@ fn main() -> eframe::Result {
         app.tab = Tab::Sumo;
         app.start_tournament();
     }
+    if args.iter().any(|a| a == "--cup") {
+        app.tab = Tab::Cup;
+    }
+    app.full = args.iter().any(|a| a == "--fullscreen");
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 760.0]).with_title("CPG Arena"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 760.0]).with_title("CPG Arena").with_fullscreen(app.full),
         ..Default::default()
     };
     eframe::run_native(
@@ -61,6 +68,7 @@ fn main() -> eframe::Result {
 enum Tab {
     Race,
     Sumo,
+    Cup,
     Design,
     Train,
 }
@@ -135,6 +143,11 @@ struct App {
     creatures: PathBuf,
     designer: design::Designer,
     trainer: train::Trainer,
+    cup: cup::Cup,
+    /// The tab shown last frame (the Cup's sound stops when it is left).
+    last_tab: Tab,
+    /// Full screen: only the arena, for the projector.
+    full: bool,
 }
 
 impl App {
@@ -167,6 +180,9 @@ impl App {
             camera: None,
             trainer: train::Trainer::new(creatures.clone()),
             designer: design::Designer::new(),
+            cup: cup::Cup::new(),
+            last_tab: Tab::Race,
+            full: false,
             creatures,
         };
         app.reload(true);
@@ -254,6 +270,14 @@ impl App {
 
     fn creature(&self, i: usize) -> &Creature {
         self.entries[i].creature.as_ref().expect("valid entry")
+    }
+
+    /// The ticked creatures, as competitors for the Cup.
+    fn entrants(&self) -> Vec<cup::Entrant> {
+        self.checked()
+            .into_iter()
+            .map(|i| cup::Entrant { name: self.creature(i).name.clone(), path: self.entries[i].path.clone(), color: self.color(i) })
+            .collect()
     }
 
     fn start_race(&mut self) {
@@ -368,30 +392,65 @@ impl eframe::App for App {
         let training = self.trainer.poll();
         let replaying = self.tab == Tab::Train && self.trainer.advance(dt, self.speed, self.paused);
         let designing = self.tab == Tab::Design && self.designer.advance(dt, self.speed, self.paused);
+        if self.last_tab == Tab::Cup && self.tab != Tab::Cup {
+            self.cup.leave();
+        }
+        self.last_tab = self.tab;
+        let cupping = self.tab == Tab::Cup && self.cup.advance(dt, self.speed, self.paused);
 
-        egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
-        egui::Panel::left("creatures").resizable(true).default_size(260.0).show(ui, |ui| self.creature_list(ui));
-        egui::Panel::right("results").resizable(true).default_size(300.0).show(ui, |ui| match self.tab {
-            Tab::Race => self.race_panel(ui),
-            Tab::Sumo => self.sumo_panel(ui),
-            Tab::Design => {
-                if let Some(a) = self.designer.panel(ui, &self.rules, &self.entries, &self.creatures) {
-                    self.design_action(a);
-                }
-            }
-            Tab::Train => {
-                if self.trainer.panel(ui, &self.folder, &self.entries, &self.rules) {
-                    self.open_creatures();
-                }
-            }
+        // Keys: F11 full screen (Esc leaves it); in the Cup, Space / Enter for
+        // the next match (or back to the bracket) and S to skip to the result.
+        let (f11, esc, next, skip) = ctx.input(|i| {
+            (i.key_pressed(egui::Key::F11), i.key_pressed(egui::Key::Escape), i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::S))
         });
-        egui::CentralPanel::default().show(ui, |ui| match self.tab {
+        if f11 || (esc && self.full) {
+            self.set_full(&ctx, !self.full);
+        }
+        // Not while typing (or while a focused button would take the key).
+        let typing = ctx.memory(|m| m.focused().is_some());
+        if self.tab == Tab::Cup && (self.full || !typing) {
+            if next {
+                self.cup.key_next();
+            }
+            if skip {
+                self.cup.key_skip();
+            }
+        }
+
+        if !self.full {
+            egui::Panel::top("top").show(ui, |ui| self.top_bar(ui, &ctx));
+            egui::Panel::left("creatures").resizable(true).default_size(260.0).show(ui, |ui| self.creature_list(ui));
+            egui::Panel::right("results").resizable(true).default_size(300.0).show(ui, |ui| match self.tab {
+                Tab::Race => self.race_panel(ui),
+                Tab::Sumo => self.sumo_panel(ui),
+                Tab::Cup => {
+                    let entrants = self.entrants();
+                    self.cup.panel(ui, &self.folder, &self.rules, &entrants);
+                }
+                Tab::Design => {
+                    if let Some(a) = self.designer.panel(ui, &self.rules, &self.entries, &self.creatures) {
+                        self.design_action(a);
+                    }
+                }
+                Tab::Train => {
+                    if self.trainer.panel(ui, &self.folder, &self.entries, &self.rules) {
+                        self.open_creatures();
+                    }
+                }
+            });
+        }
+        let central = if self.full { egui::CentralPanel::no_frame() } else { egui::CentralPanel::default() };
+        central.show(ui, |ui| match self.tab {
             Tab::Design => self.designer.view(ui, &self.rules),
             Tab::Train => self.trainer.view(ui, &self.rules),
+            Tab::Cup => self.cup.view(ui, &self.rules, self.full),
             _ => self.canvas(ui),
         });
+        if self.full {
+            self.full_screen_controls(&ctx);
+        }
 
-        if self.running() || self.tour_pending.is_some() || replaying || designing {
+        if self.running() || self.tour_pending.is_some() || replaying || designing || cupping {
             ctx.request_repaint();
         } else if training {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -402,7 +461,31 @@ impl eframe::App for App {
 }
 
 impl App {
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
+    fn set_full(&mut self, ctx: &egui::Context, on: bool) {
+        self.full = on;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+    }
+
+    /// In full screen, when the mouse moves: how to leave, and the Cup's keys.
+    fn full_screen_controls(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.pointer.time_since_last_movement()) > 2.5 {
+            return;
+        }
+        let mut leave = false;
+        egui::Area::new(egui::Id::new("full_screen_controls")).anchor(Align2::RIGHT_TOP, [-12.0, 12.0]).order(egui::Order::Foreground).show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                leave = ui.button("Leave full screen (Esc)").clicked();
+                if self.tab == Tab::Cup {
+                    ui.label(RichText::new("Space: next match, or back to the bracket\nS: skip to the result").small());
+                }
+            });
+        });
+        if leave {
+            self.set_full(ctx, false);
+        }
+    }
+
+    fn top_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.heading("CPG Arena");
             ui.separator();
@@ -420,9 +503,13 @@ impl App {
             ui.separator();
             ui.selectable_value(&mut self.tab, Tab::Race, "Race");
             ui.selectable_value(&mut self.tab, Tab::Sumo, "Sumo");
+            ui.selectable_value(&mut self.tab, Tab::Cup, "Cup").on_hover_text("A knockout competition with a random draw");
             ui.selectable_value(&mut self.tab, Tab::Design, "Design");
             ui.selectable_value(&mut self.tab, Tab::Train, "Train");
             ui.separator();
+            if ui.button("Full screen").on_hover_text("Only the arena, for the projector (F11). Esc to leave.").clicked() {
+                self.set_full(ctx, true);
+            }
             let label = if self.paused { "▶ Play" } else { "⏸ Pause" };
             if ui.button(label).clicked() {
                 self.paused = !self.paused;
@@ -475,7 +562,9 @@ impl App {
                             info = format!("by {} · {info}", c.author);
                         }
                         ui.label(RichText::new(info).small().weak());
-                        if let Some(m) = &c.meta {
+                        // No scores during the Cup: seeing them, the class would
+                        // compare and guess the winners, and the suspense would be gone.
+                        if let Some(m) = c.meta.as_ref().filter(|_| self.tab != Tab::Cup) {
                             ui.label(
                                 RichText::new(format!("trained: {} · fitness {:.2} · {} evals", m.trained_for, m.fitness, m.evaluations))
                                     .small()

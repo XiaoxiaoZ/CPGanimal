@@ -52,6 +52,8 @@ Your GA should beat **Random search** with the same budget. A copy of `my_ga.py`
 
 The **Race** and **Sumo** tabs run your creatures against each other. In the Race tab you can also race on an **environment seed**: does your creature still win on a track it has never seen? For sumo, an environment seed puts hills on the platform (the same on both sides). To hand in, copy your creature's `.toml` file from `creatures/` to the class folder your teacher gives you.
 
+The class competition is the **Cup**: a knockout, one against one, and the winner goes on to the next round. The field is a random environment seed chosen on the day, so train on several environment seeds (Training environments), not just one. Races in the Cup last a minute (instead of 15 s), so make sure your creature keeps going.
+
 ## Problems
 
 - **The Train tab says "Python 3 not found"**: install Python (see above), then press **find** next to the **Python** field. If Python is installed somewhere unusual, type the path to its `python.exe` in that field (or a command that starts it, for example `py -3`).
