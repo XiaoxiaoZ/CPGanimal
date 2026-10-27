@@ -87,7 +87,8 @@ class Problem:
             self._args += ["--rules", str(rules)]
         self._args += _env_args(trials, env_seed, friction_jitter, aggregate)
         self._watch = {"kind": "genomes", "template": os.path.abspath(template), "mode": mode, "level": level,
-                       "opponents": _abspath(opponents), "rules": _abspath(rules)}
+                       "opponents": _abspath(opponents), "rules": _abspath(rules),
+                       **_env_record(trials, env_seed, friction_jitter, aggregate)}
         self.info = json.loads(self._run("info", "--json"))
         self.dim = self.info["dim"]
         self.genes = [g["name"] for g in self.info["genes"]]
@@ -148,6 +149,10 @@ def _env_args(trials, env_seed, friction_jitter, aggregate):
     if env_seed is not None:
         args += ["--env-seed", str(env_seed)]
     return args
+
+
+def _env_record(trials, env_seed, friction_jitter, aggregate):
+    return {"trials": trials, "env_seed": env_seed, "friction_jitter": friction_jitter, "aggregate": aggregate}
 
 
 def _abspath(path):
@@ -214,7 +219,8 @@ class Judge:
         self._rules_args = [str(rules)] if rules else []
         if rules:
             self._args += ["--rules", str(rules)]
-        self._watch = {"kind": "creatures", "mode": mode, "opponents": _abspath(opponents), "rules": _abspath(rules)}
+        self._watch = {"kind": "creatures", "mode": mode, "opponents": _abspath(opponents), "rules": _abspath(rules),
+                       **_env_record(trials, env_seed, friction_jitter, aggregate)}
         self.rules = json.loads(_arena("rules", *self._rules_args).stdout)
         self.errors = []
         self.evaluations = 0

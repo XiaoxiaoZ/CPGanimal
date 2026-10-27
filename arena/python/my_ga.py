@@ -35,7 +35,9 @@ def select(population, fitness):
     fitness[i] is the fitness of population[i]; higher is better. Fitter
     individuals should be picked more often, but not always, or the
     population loses its variety too fast.
-    TODO: tournament selection, roulette wheel, rank selection, ...
+    TODO: tournament selection (draw k individuals at random and return only
+    the fittest of them: a larger k favours the fit more strongly), roulette
+    wheel, rank selection, ...
     Placeholder: a random individual, whatever its fitness."""
     return random.choice(population)
 
@@ -44,8 +46,10 @@ def crossover(a, b):
     """Make a child from parents `a` and `b` and return it as a new list.
 
     The child should take something from both parents, gene by gene.
-    TODO: uniform (each gene from a or b), one-point, blend (a value
-    between the parents' values), ...
+    Crossover only recombines what the parents have: where they agree, the
+    child agrees too, and only mutation can bring in something new.
+    TODO: uniform (each gene from a or b), one-point, blend (a value between
+    the parents' values, or a little beyond them), ...
     Placeholder: a copy of the first parent."""
     return list(a)
 
@@ -54,9 +58,11 @@ def mutate(genome, sigma=0.1):
     """Change a child a little and return it as a new list.
 
     Small random changes let the population explore beyond what its parents
-    already have. `sigma` is the mutation strength (the --sigma option).
+    already have. `sigma` is the mutation strength (the --sigma option), in
+    gene units: 0 to 1 is a parameter's whole range, so 0.1 is 10% of it.
     TODO: e.g. add Gaussian noise random.gauss(0, sigma) to each gene with a
-    small probability such as 1/len(genome).
+    small probability such as 1/len(genome) (about one gene per child).
+    Changing many genes at once tends to break good genomes.
     Placeholder: no change at all."""
     return list(genome)
 
@@ -106,11 +112,13 @@ def run(problem, population=50, budget=1000, elites=2, crossover_rate=0.9,
     # Each generation evaluates `population - elites` new children. Stop before
     # that would exceed the budget, so different algorithms compare fairly.
     while problem.evaluations + population - elites <= budget:
-        # 1. Elitism: the `elites` best individuals survive unchanged.
+        # 1. Elitism: the `elites` best individuals survive as they are, with no
+        #    crossover and no mutation, so the best found so far is never broken.
         order = sorted(range(len(pop)), key=lambda i: fit[i], reverse=True)
         next_pop = [pop[i] for i in order[:elites]]
         next_fit = [fit[i] for i in order[:elites]]
-        # 2. Children fill the rest of the new generation.
+        # 2. Children fill the rest of the new generation, so the population
+        #    keeps the same size: elites + children = population.
         children = []
         while len(next_pop) + len(children) < population:
             a = select(pop, fit)                          # first parent
@@ -118,9 +126,13 @@ def run(problem, population=50, budget=1000, elites=2, crossover_rate=0.9,
                 child = crossover(a, select(pop, fit))    # mix it with a second parent
             else:
                 child = list(a)                           # or copy it
-            children.append(clamp(mutate(child)))         # then mutate, keeping genes in [0, 1]
-        # 3. Evaluate the children only. The elites keep their fitness: the
-        #    simulation is deterministic, so the same genome always scores the same.
+            # Every child goes through mutation, but mutation may change no gene
+            # at all: then a copied child is an exact copy of its parent.
+            children.append(clamp(mutate(child)))         # mutate, keeping genes in [0, 1]
+        # 3. The new generation replaces the old one: everyone but the elites is
+        #    dropped (they may have been parents). Only the children are evaluated;
+        #    the elites keep their fitness, since the simulation is deterministic
+        #    and the same genome always scores the same.
         pop = next_pop + children
         fit = next_fit + problem.evaluate(children)
         generation += 1

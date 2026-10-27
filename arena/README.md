@@ -161,7 +161,8 @@ Reference results (worm, race, a budget of 1000 evaluations, default settings): 
 If you'd rather not use a terminal, the **Train** tab at the top of `arena-gui` runs these scripts directly:
 
 - **Algorithm**: the default GA (`ga.py`), your own GA (`my_ga.py`), structure evolution, co-evolution, random search, or **Custom script…** to pick any `.py` file (e.g. a copy of `my_ga.py` you have made your own).
-- **Settings**: template creature (from the current folder), mode, level, number of evaluations, population size, random seed; for sumo, the Rock or any creatures you tick in the current folder (the fitness is the average over them; for co-evolution these are the benchmark). If the folder has an `arena.toml`, it is used as the rules. `Extra args` passes any other options to the script, e.g. `--sigma 0.2`.
+- **Settings**: template creature (from the current folder), mode, level, number of evaluations, population size, random seed; for sumo, the Rock or any creatures you tick in the current folder (the fitness is the average over them; for co-evolution these are the benchmark). If the folder has an `arena.toml`, it is used as the rules. **Training environments** trains on several terrains at once (see "Generalisation" below): how many terrains, how much the friction varies, and whether the fitness is the average or the worst case. `Extra args` passes any other options to the script, e.g. `--sigma 0.2`.
+- **Python** is found by itself when the program starts, since it is not called `python` on every computer: it tries `python`, `py -3` (the launcher of the python.org installer) and `python3`, then `python.exe` in the usual install folders (python.org for this user or for all users, the Python install manager, Anaconda / Miniconda, Thonny). Each candidate is run once and must report Python 3.8 or newer, so the Microsoft Store placeholder `python.exe` (which only says "Python was not found") is skipped. The form shows the version found; to use another Python, type its command or the path to its `python.exe` in the field, and **find** looks again (e.g. after installing Python).
 - **Result**: every champion is saved as a **new** creature in the `creatures` folder, with the algorithm and time in its name, e.g. `Worm (ga 14:02:31)` in `worm-ga-20260929-140231.toml`. Nothing is overwritten, so all your runs appear in the list on the left and can race each other straight away. (When another folder is open, a button opens the `creatures` folder.)
 - **Watch the population while training** (checkbox): replays each generation with every individual drawn faintly and the best one highlighted. You see the population go from random flailing to a gait. Drag the generation slider to go back to any generation, or tick "follow the latest"; the speed slider and Pause at the top control the playback. In sumo, every individual fights the first opponent. This works with any script, your own GA included: `python/arena.py` records every population passed to `evaluate`, and in co-evolution every population that fights a round of `fight` duels (each individual's fitness is then its mean score in those duels; in the replay they all fight the Rock).
 - **Comparison**: every run is drawn on the same chart, best fitness as a solid line and mean fitness dashed, against the number of evaluations; a vertical line marks the generation being replayed. With the same number of evaluations you can see at a glance whether your GA, the default GA or random search does best.
@@ -286,7 +287,7 @@ python3 python/generalize.py creatures/worm.toml --roughness 0.3                
 python3 python/generalize.py creatures/walker.toml --level body --roughness 0.6 --same evaluations --budget 1000
 ```
 
-`ga.py` supports these options too: `--trials 4 --env-seed 0 --friction-jitter 0.3 --aggregate min`.
+All the training scripts take these options: `--trials 4 --env-seed 0 --friction-jitter 0.3 --aggregate min`. In the GUI's Train tab, choose the track (flat, the class track, or an environment seed, see "Compete") and the number of terrains under **Training environments**: terrain k is the track's terrain + k, with the same hill height and slope. The tab shows the training tracks before training starts, and the replay shows the first terrain the population was trained on.
 
 #### Rust
 
@@ -310,11 +311,13 @@ p.save(&best, "me.toml".as_ref(), Some("My Champion"))?;
 
 Without a folder argument the GUI opens `creatures` (creatures made in the Design and Train tabs are saved there too); pick another folder with **Browse…** at the top. The GUI checks the folder every second and reloads when files are added or changed. Files that break the rules are listed on the left in red, with the reason.
 
+The Race and Train tabs run on **flat** ground, on the **class track** (shown instead of "flat" when the open folder has an `arena.toml`: the teacher's track), or on an **environment seed**: one number (0 to 9999) from which the hills, the terrain, the slope and the friction are generated. The same seed always gives the same track, so a class can train for and race on "environment 4711"; both tabs show the track before they start. In the Race tab, tick "a new environment for every race" to get a surprise track each time, a quick test of how well creatures generalise. For sumo, the same seed puts its hills on the platform, mirrored so that both sides are equal, and sets the friction (there is no slope in sumo: it would favour one side).
+
 ---
 
 ## Rules and scoring (teachers)
 
-Every creature follows the same rules: **a bigger body is heavier, but every joint has the same motor**. The defaults are in `Rules::default()` in [`creature.rs`](src/creature.rs); an `arena.toml` in the class folder can override any of them (a misspelled field name is an error):
+Every creature follows the same rules: **a bigger body is heavier, but every joint has the same motor**. The defaults are in `Rules::default()` in [`creature.rs`](src/creature.rs); an `arena.toml` in the class folder can override any of them (a misspelled field name is an error). For the track, an environment seed in the Race and Train tabs is the quicker alternative (see "Compete"):
 
 ```toml
 # arena.toml (only the settings you want to change)
@@ -326,7 +329,8 @@ race_time = 15.0          # race duration (s)
 sumo_time = 20.0          # sumo duration (s)
 ring_width = 8.0          # width of the sumo platform (m)
 friction = 0.9
-terrain_roughness = 0.0   # hill height of the track (m), 0 = flat; the first 1 m of the start is always flat
+terrain_roughness = 0.0   # hill height of the track (m), 0 = flat; the first 1 m of the start is always flat;
+                          # also hills on the sumo platform, mirrored so both sides are equal
 terrain_seed = 0          # which random terrain; you don't have to tell the students
 slope = 0.0               # track slope (degrees), positive = uphill
 ```
@@ -356,7 +360,7 @@ Students do not need Rust. On Windows, run
 powershell -ExecutionPolicy Bypass -File package.ps1
 ```
 
-in `arena/`. It builds the programs and puts together `dist/CPG-Arena/` and `dist/CPG-Arena.zip` (about 11 MB): `arena-gui.exe`, `arena.exe`, `python/`, the example creatures (only the files tracked by git), a short guide for students ([`STUDENTS.md`](STUDENTS.md), as `README.md`) and this guide (as `GUIDE.md`). The programs need only Windows' own libraries; students need Python 3.8+ for training. Unzipped anywhere, `arena-gui.exe` finds `python/` and `creatures/` next to itself, and saves new creatures there. For a "write a GA from scratch" assignment, delete `python/ga.py` from the folder before zipping it again (co-evolution and the Train tab's default GA use it).
+in `arena/`. It builds the programs and puts together `dist/CPG-Arena/` and `dist/CPG-Arena.zip` (about 11 MB): `arena-gui.exe`, `arena.exe`, `python/`, the untrained example creatures (worm, walker and tailfin from git; no evolved ones, so students evolve their own), a short guide for students ([`STUDENTS.md`](STUDENTS.md), as `README.md`) and this guide (as `GUIDE.md`). The programs need only Windows' own libraries; students need Python 3.8+ for training. Unzipped anywhere, `arena-gui.exe` finds `python/` and `creatures/` next to itself, and saves new creatures there. For a "write a GA from scratch" assignment, delete `python/ga.py` from the folder before zipping it again (co-evolution and the Train tab's default GA use it).
 
 ---
 
@@ -375,6 +379,9 @@ arena/
 │       └── arena-gui/    # GUI (eframe/egui)
 │           ├── main.rs   # creature list, race, sumo
 │           ├── design.rs # Design tab: build a creature from blocks, try it, save it
+│           ├── environment.rs # environment seeds: a whole track from one number; track and platform previews
+│           ├── python.rs # finds Python on the computer for the Train tab
+│           ├── scene.rs  # the look: sky, stands, textured ground, shaded creatures, sumo ring (drawing only)
 │           └── train.rs  # Train tab: runs the Python training scripts, plots fitness curves, replays populations
 ├── python/           # arena.py interface, ga.py default GA, my_ga.py skeleton, random_search.py baseline,
 │                     # evolve_structure.py structure evolution, coevolve.py co-evolution, generalize.py generalisation experiment

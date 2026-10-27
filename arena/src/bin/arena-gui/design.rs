@@ -596,8 +596,8 @@ impl Designer {
             let scale = (rect.width() / (ring + 3.0)).min(rect.height() / 3.0);
             let ground_y = rect.top() + rect.height() * 0.62;
             let to_screen = |p: [f32; 2]| Pos2::new(rect.center().x + p[0] * scale, ground_y - p[1] * scale);
-            let half = ring / 2.0;
-            painter.rect_filled(Rect::from_two_pos(to_screen([-half, 0.0]), to_screen([half, -1.0])), 2.0, Color32::from_rgb(170, 140, 100));
+            super::scene::sky(&painter, rect, ground_y, 0.0, scale);
+            super::draw_ring(&painter, a, &to_screen, scale);
             draw_creatures(&painter, a, &[color, Color32::from_gray(150)], &to_screen, scale, 255);
             match a.sumo_status() {
                 None => format!("t = {:.1} / {:.0} s", a.time, a.rules.sumo_time),
@@ -622,9 +622,9 @@ impl Designer {
             draw_creatures(&painter, a, &[color], &to_screen, fit, 255);
             format!("{:.2} m in {:.1} / {:.0} s", a.progress(0), a.time, a.rules.race_time)
         };
-        painter.text(rect.left_top() + Vec2::new(10.0, 8.0), Align2::LEFT_TOP, format!("Trying {}: {status}", self.creature.name), FontId::proportional(16.0), Color32::WHITE);
+        super::scene::shadow_text(&painter, rect.left_top() + Vec2::new(10.0, 8.0), Align2::LEFT_TOP, format!("Trying {}: {status}", self.creature.name), FontId::proportional(16.0), Color32::WHITE);
         let hint = "Change anything, or press ■ Stop, to go back to the design.";
-        painter.text(rect.left_top() + Vec2::new(10.0, 30.0), Align2::LEFT_TOP, hint, FontId::proportional(13.0), CANVAS_TEXT);
+        super::scene::shadow_text(&painter, rect.left_top() + Vec2::new(10.0, 30.0), Align2::LEFT_TOP, hint, FontId::proportional(13.0), Color32::from_gray(210));
     }
 }
 

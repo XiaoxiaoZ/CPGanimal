@@ -8,12 +8,15 @@
 //! saved to the creatures folder.
 
 mod design;
+mod environment;
+mod python;
+mod scene;
 mod train;
 
 use cpg_arena::creature::{Creature, Rules};
 use cpg_arena::game::{self, Bout, Entry, Standing};
 use cpg_arena::sim::{Arena, SumoResult};
-use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, Vec2};
+use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Vec2};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
@@ -44,7 +47,14 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 760.0]).with_title("CPG Arena"),
         ..Default::default()
     };
-    eframe::run_native("CPG Arena", options, Box::new(|_cc| Ok(Box::new(app))))
+    eframe::run_native(
+        "CPG Arena",
+        options,
+        Box::new(|cc| {
+            scene::install_fonts(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
+    )
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -108,6 +118,14 @@ struct App {
     paused: bool,
     accumulator: f64,
     race: Vec<Racer>,
+    /// The rules the current race runs on, and a description of its track.
+    race_rules: Rules,
+    race_track: String,
+    /// The track to race on, and whether each race gets a new environment seed.
+    race_choice: environment::TrackChoice,
+    /// The folder has an arena.toml: its own track is the class track, not flat.
+    class_track: bool,
+    race_new_each: bool,
     bout: Option<Bout1>,
     pick: [usize; 2],
     tour: Option<TourResult>,
@@ -137,6 +155,11 @@ impl App {
             paused: false,
             accumulator: 0.0,
             race: Vec::new(),
+            race_rules: Rules::default(),
+            race_track: String::new(),
+            race_choice: environment::TrackChoice::new(),
+            class_track: false,
+            race_new_each: false,
             bout: None,
             pick: [0, 1],
             tour: None,
@@ -201,6 +224,7 @@ impl App {
         let known: HashSet<PathBuf> = self.entries.iter().map(|e| e.path.clone()).collect();
         self.entries = game::load_folder(&self.folder, &self.rules);
         self.stamp = game::folder_stamp(&self.folder);
+        self.class_track = self.folder.join("arena.toml").is_file();
         for e in &self.entries {
             // New files join the selection automatically.
             if e.creature.is_ok() && (select_all || !known.contains(&e.path)) {
@@ -237,11 +261,16 @@ impl App {
         self.camera = None;
         self.accumulator = 0.0;
         self.paused = false;
+        if self.race_choice.seeded && self.race_new_each {
+            self.race_choice.seed = environment::new_seed();
+        }
+        let (rules, track) = (self.race_choice.rules(&self.rules), self.race_choice.describe(&self.rules, self.class_track));
         self.race = self
             .checked()
             .into_iter()
-            .map(|i| Racer { name: self.creature(i).name.clone(), arena: Arena::race(self.creature(i), &self.rules), color: self.color(i) })
+            .map(|i| Racer { name: self.creature(i).name.clone(), arena: Arena::race(self.creature(i), &rules), color: self.color(i) })
             .collect();
+        (self.race_rules, self.race_track) = (rules, track);
     }
 
     fn start_bout(&mut self, a: &Creature, b: &Creature, colors: [Color32; 2]) {
@@ -284,7 +313,7 @@ impl App {
     }
 
     fn running(&self) -> bool {
-        let race_on = self.race.iter().any(|r| r.arena.time < self.rules.race_time);
+        let race_on = self.race.iter().any(|r| r.arena.time < r.arena.rules.race_time);
         let bout_on = self.bout.as_ref().is_some_and(|b| b.result.is_none());
         !self.paused && (race_on || bout_on)
     }
@@ -301,7 +330,7 @@ impl App {
             self.accumulator -= step;
             budget -= 1;
             for r in &mut self.race {
-                if r.arena.time < self.rules.race_time && !r.arena.is_broken() {
+                if r.arena.time < r.arena.rules.race_time && !r.arena.is_broken() {
                     r.arena.step();
                 }
             }
@@ -351,14 +380,14 @@ impl eframe::App for App {
                 }
             }
             Tab::Train => {
-                if self.trainer.panel(ui, &self.folder, &self.entries) {
+                if self.trainer.panel(ui, &self.folder, &self.entries, &self.rules) {
                     self.open_creatures();
                 }
             }
         });
         egui::CentralPanel::default().show(ui, |ui| match self.tab {
             Tab::Design => self.designer.view(ui, &self.rules),
-            Tab::Train => self.trainer.view(ui),
+            Tab::Train => self.trainer.view(ui, &self.rules),
             _ => self.canvas(ui),
         });
 
@@ -469,6 +498,21 @@ impl App {
     fn race_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Race");
         ui.label(format!("Go right as far as possible in {:.0} s.", self.rules.race_time));
+        let before = self.race_choice;
+        self.race_choice.ui(ui, self.class_track);
+        if self.race_choice != before {
+            // Show the newly chosen track instead of the last race.
+            self.race.clear();
+        }
+        if self.race_choice.seeded {
+            ui.checkbox(&mut self.race_new_each, "a new environment for every race");
+        }
+        let next = if self.race_choice.seeded && self.race_new_each {
+            "Each race gets a new environment seed.".to_string()
+        } else {
+            self.race_choice.describe(&self.rules, self.class_track)
+        };
+        ui.label(RichText::new(next).small().weak());
         if ui.add_enabled(!self.checked().is_empty(), egui::Button::new("▶ Start race")).clicked() {
             self.start_race();
         }
@@ -477,11 +521,12 @@ impl App {
             ui.label("Tick creatures on the left, then start.");
             return;
         }
+        ui.label(RichText::new(&self.race_track).small());
         let t = self.race.iter().map(|r| r.arena.time).fold(0.0, f64::max);
-        ui.label(format!("t = {t:.1} / {:.0} s", self.rules.race_time));
+        ui.label(format!("t = {t:.1} / {:.0} s", self.race_rules.race_time));
         let mut order: Vec<(usize, f64)> = self.race.iter().enumerate().map(|(k, r)| (k, r.arena.progress(0))).collect();
         order.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let done = t >= self.rules.race_time - 1e-9;
+        let done = t >= self.race_rules.race_time - 1e-9;
         egui::Grid::new("race_table").striped(true).show(ui, |ui| {
             for (rank, (k, d)) in order.iter().enumerate() {
                 let r = &self.race[*k];
@@ -587,8 +632,23 @@ impl App {
             self.draw_sumo(&painter, rect);
         } else if !self.race.is_empty() {
             self.draw_race(&painter, rect);
+        } else if self.tab == Tab::Race {
+            // The track the next race will run on.
+            environment::draw_terrain(&painter, rect.shrink2(Vec2::new(30.0, 70.0)), &self.race_choice.rules(&self.rules));
+            let head = if self.race_choice.seeded && self.race_new_each {
+                "A new environment for every race; this is the next one.".to_string()
+            } else {
+                self.race_choice.describe(&self.rules, self.class_track)
+            };
+            scene::shadow_text(&painter, rect.left_top() + Vec2::new(10.0, 8.0), Align2::LEFT_TOP, head, FontId::proportional(15.0), Color32::WHITE);
+            let hint = "The first 20 m of the track. Tick creatures on the left, then ▶ Start race.";
+            scene::shadow_text(&painter, rect.left_top() + Vec2::new(10.0, 28.0), Align2::LEFT_TOP, hint, FontId::proportional(13.0), Color32::from_gray(200));
         } else {
-            painter.text(rect.center(), Align2::CENTER_CENTER, "Pick creatures, then Start race or Fight!", FontId::proportional(18.0), Color32::from_gray(160));
+            // The platform the next bout will be on.
+            environment::draw_ring(&painter, rect, &self.rules);
+            let head = environment::TrackChoice { seeded: false, seed: 0 }.describe_sumo(&self.rules, self.class_track);
+            scene::shadow_text(&painter, rect.left_top() + Vec2::new(10.0, 8.0), Align2::LEFT_TOP, head, FontId::proportional(15.0), Color32::WHITE);
+            scene::shadow_text(&painter, rect.center_top() + Vec2::new(0.0, 40.0), Align2::CENTER_TOP, "Pick two creatures, then Fight!", FontId::proportional(18.0), Color32::from_gray(220));
         }
     }
 
@@ -623,32 +683,27 @@ impl App {
                 painter.rect_filled(lane, 0.0, Color32::from_rgb(33, 38, 48));
             }
             draw_track(painter, lane, ground_y, &to_screen, (x0, x1), scale, &r.arena.terrain, k == n - 1 || lane_h > 60.0);
-            draw_creatures(painter, &r.arena, &[r.color], &to_screen, scale, 255);
+            draw_creatures(&painter.with_clip_rect(lane.intersect(rect)), &r.arena, &[r.color], &to_screen, scale, 255);
             let d = r.arena.progress(0);
-            painter.text(Pos2::new(rect.left() + 10.0, top + 6.0), Align2::LEFT_TOP, format!("{}  {:.2} m", r.name, d), FontId::proportional(14.0), r.color);
+            // On a dark tag, so it stays readable in thin lanes.
+            let font = FontId::proportional(if lane_h < 40.0 { 11.0 } else { 14.0 });
+            let at = Pos2::new(rect.left() + 10.0, top + (lane_h * 0.12).min(6.0));
+            let label = painter.layout_no_wrap(format!("{}  {:.2} m", r.name, d), font, r.color);
+            painter.rect_filled(Rect::from_min_size(at, label.size()).expand2(Vec2::new(5.0, 1.0)), 4.0, Color32::from_black_alpha(170));
+            painter.galley(at, label, r.color);
         }
         let t = self.race.iter().map(|r| r.arena.time).fold(0.0, f64::max);
-        let mut hud = format!("t = {t:.1} / {:.0} s", self.rules.race_time);
-        if self.rules.slope != 0.0 {
-            hud += &format!("   slope {:+.0}° ({})", self.rules.slope, if self.rules.slope > 0.0 { "uphill" } else { "downhill" });
+        let r = &self.race_rules;
+        let mut hud = format!("t = {t:.1} / {:.0} s", r.race_time);
+        if r.slope != 0.0 {
+            hud += &format!("   slope {:+.1}° ({})", r.slope, if r.slope > 0.0 { "uphill" } else { "downhill" });
         }
-        painter.text(rect.right_top() + Vec2::new(-12.0, 6.0), Align2::RIGHT_TOP, hud, FontId::proportional(18.0), Color32::WHITE);
+        scene::shadow_text(painter, rect.right_top() + Vec2::new(-12.0, 6.0), Align2::RIGHT_TOP, hud, FontId::proportional(18.0), Color32::WHITE);
     }
 
     fn draw_sumo(&mut self, painter: &egui::Painter, rect: Rect) {
-        let Some(ring) = self.bout.as_ref().map(|b| b.arena.rules.ring_width as f32) else { return };
-        let (cx, scale) = self.follow((0.0, rect.width() / (ring + 3.0)));
-        let b = self.bout.as_ref().expect("bout");
-        let ground_y = rect.top() + rect.height() * 0.65;
-        let to_screen = |p: [f32; 2]| Pos2::new(rect.center().x + (p[0] - cx) * scale, ground_y - p[1] * scale);
-        let half = ring / 2.0;
-        painter.rect_filled(Rect::from_two_pos(to_screen([-half, 0.0]), to_screen([half, -1.0])), 2.0, Color32::from_rgb(170, 140, 100));
-        painter.line_segment([to_screen([0.0, 0.0]), to_screen([0.0, -0.15])], Stroke::new(2.0, Color32::WHITE));
-        draw_creatures(painter, &b.arena, &b.colors, &to_screen, scale, 255);
-        for k in 0..2 {
-            let c = b.arena.com(k);
-            painter.text(to_screen([c[0] as f32, c[1] as f32 + 0.8]), Align2::CENTER_BOTTOM, &b.names[k], FontId::proportional(15.0), b.colors[k]);
-        }
+        let Some(b) = self.bout.as_ref() else { return };
+        scene::sumo_view(painter, rect, &b.arena, &b.colors, &b.names, 0.4);
         let status = match &b.result {
             None => format!("t = {:.1} / {:.0} s", b.arena.time, b.arena.rules.sumo_time),
             Some(r) => match r.winner {
@@ -656,7 +711,7 @@ impl App {
                 None => format!("Draw ({})", r.reason),
             },
         };
-        painter.text(rect.left_top() + Vec2::new(12.0, 10.0), Align2::LEFT_TOP, status, FontId::proportional(20.0), Color32::WHITE);
+        scene::shadow_text(painter, rect.left_top() + Vec2::new(12.0, 10.0), Align2::LEFT_TOP, status, FontId::proportional(20.0), Color32::WHITE);
     }
 }
 
@@ -669,56 +724,51 @@ fn finished(a: &Arena, sumo: bool) -> bool {
     }
 }
 
-/// Ground, distance marks, hills and start line of one race lane.
+/// One race lane: sky, the ground with its hills, distance marks and the
+/// start flag (see scene.rs; only the look, the physics are the arena's).
 #[allow(clippy::too_many_arguments)]
-fn draw_track(painter: &egui::Painter, lane: Rect, ground_y: f32, to_screen: &impl Fn([f32; 2]) -> Pos2, (x0, x1): (f32, f32), scale: f32, terrain: &[[f32; 2]], labels: bool) {
-    painter.rect_filled(Rect::from_min_max(Pos2::new(lane.left(), ground_y), Pos2::new(lane.right(), ground_y + lane.height() * 0.06 + 2.0)), 0.0, Color32::from_rgb(110, 90, 65));
-    let label_every = if scale > 40.0 { 1 } else if scale > 15.0 { 5 } else { 10 };
-    for m in (x0.floor() as i32)..=(x1.ceil() as i32) {
-        if m % label_every != 0 {
-            continue;
-        }
-        let x = to_screen([m as f32, 0.0]).x;
-        let tick = if m == 0 { Color32::WHITE } else { Color32::from_gray(150) };
-        painter.line_segment([Pos2::new(x, ground_y), Pos2::new(x, ground_y + 5.0)], Stroke::new(1.0, tick));
-        if labels {
-            painter.text(Pos2::new(x, ground_y + 6.0), Align2::CENTER_TOP, format!("{m} m"), FontId::proportional(10.0), Color32::from_gray(170));
-        }
-    }
-    // Hills: filled columns between the ground line and the terrain surface.
-    let hill = Color32::from_rgb(110, 90, 65);
-    let visible: Vec<&[f32; 2]> = terrain.iter().filter(|p| p[0] >= x0 - 0.2 && p[0] <= x1 + 0.2).collect();
-    for w in visible.windows(2) {
-        let (a, b) = (w[0], w[1]);
-        if a[1] > 1e-3 || b[1] > 1e-3 {
-            let pts = vec![to_screen([a[0], 0.0]), to_screen(*a), to_screen(*b), to_screen([b[0], 0.0])];
-            painter.add(Shape::convex_polygon(pts, hill, Stroke::new(1.0, hill)));
-        }
-    }
-    let start = to_screen([0.0, 0.0]);
-    painter.line_segment([Pos2::new(start.x, lane.top() + 4.0), Pos2::new(start.x, ground_y)], Stroke::new(1.0, Color32::from_white_alpha(40)));
+fn draw_track(painter: &egui::Painter, lane: Rect, ground_y: f32, to_screen: &impl Fn([f32; 2]) -> Pos2, x_range: (f32, f32), scale: f32, terrain: &[[f32; 2]], labels: bool) {
+    let marks = if labels { scene::Marks::Labels } else { scene::Marks::Stakes };
+    scene::track(painter, lane, ground_y, to_screen, x_range, scale, terrain, marks);
+}
+
+/// The sumo platform of an arena, with its hills.
+fn draw_ring(painter: &egui::Painter, arena: &Arena, to_screen: &impl Fn([f32; 2]) -> Pos2, scale: f32) {
+    scene::ring(painter, &arena.rules, &arena.terrain, to_screen, scale);
 }
 
 /// `alpha` < 255 draws faint ghosts (outline and eye fade too).
 fn draw_creatures(painter: &egui::Painter, arena: &Arena, colors: &[Color32], to_screen: &impl Fn([f32; 2]) -> Pos2, scale: f32, alpha: u8) {
-    let mut first_of = vec![true; arena.fighters.len()];
-    let outline = Color32::from_black_alpha((160 * alpha as u16 / 255) as u8);
-    for s in arena.segments() {
-        let base = colors[s.fighter.min(colors.len() - 1)];
-        let fill = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha);
-        let (sin, cos) = s.angle.sin_cos();
-        let corner = |u: f32, v: f32| {
-            let (lx, ly) = (u * s.half[0], v * s.half[1]);
-            to_screen([s.center[0] + lx * cos - ly * sin, s.center[1] + lx * sin + ly * cos])
-        };
-        let pts = vec![corner(1.0, 1.0), corner(-1.0, 1.0), corner(-1.0, -1.0), corner(1.0, -1.0)];
-        painter.add(Shape::convex_polygon(pts, fill, Stroke::new(1.0, outline)));
-        // An eye on the torso so you can tell which way is forward.
-        if std::mem::take(&mut first_of[s.fighter]) {
-            let r = (s.half[1] * 0.45 * scale).max(2.0);
-            let eye = corner(0.6, 0.0);
-            painter.circle_filled(eye, r, Color32::from_white_alpha(alpha));
-            painter.circle_filled(eye, r * 0.5, Color32::from_black_alpha(alpha));
+    scene::creatures(painter, arena, colors, to_screen, scale, alpha);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_race_runs_on_the_chosen_track() {
+        let dir = std::env::temp_dir().join("arena-gui-race-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        for c in ["worm", "walker"] {
+            std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("creatures/{c}.toml")), dir.join(format!("{c}.toml"))).unwrap();
         }
+        std::fs::write(dir.join("arena.toml"), "terrain_roughness = 0.2\nrace_time = 12.0\n").unwrap();
+        let mut app = App::new(dir);
+        // A random environment: every racer gets the track generated from the seed, the folder's other rules stay.
+        app.race_choice = environment::TrackChoice { seeded: true, seed: 4711 };
+        app.start_race();
+        let track = environment::Track::random(4711);
+        assert_eq!(app.race.len(), 2);
+        assert!(app.race.iter().all(|r| environment::Track::of(&r.arena.rules) == track && r.arena.rules.race_time == 12.0));
+        assert!(app.race_track.contains("4711"), "{}", app.race_track);
+        // "New for every race" picks another seed when the race starts.
+        app.race_new_each = true;
+        app.start_race();
+        assert_eq!(environment::Track::of(&app.race_rules), environment::Track::random(app.race_choice.seed));
+        // Back to the folder's track.
+        app.race_choice.seeded = false;
+        app.start_race();
+        assert_eq!(app.race[0].arena.rules.terrain_roughness, 0.2);
     }
 }

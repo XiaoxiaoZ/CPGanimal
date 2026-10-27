@@ -38,11 +38,16 @@ def main():
     ap.add_argument("--hall", type=int, default=10, help="past champions kept as opponents (0 = no hall of fame)")
     ap.add_argument("--benchmark", help="folder of fixed opponents to measure real progress (default: the Rock)")
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--trials", type=int, default=1, help="environments per bout (friction varies with --friction-jitter)")
+    ap.add_argument("--env-seed", type=int, help="seed of the first environment")
+    ap.add_argument("--friction-jitter", type=float, default=0.0, help="random friction scale +-j per environment")
+    ap.add_argument("--aggregate", default="mean", choices=["mean", "min"], help="combine environments by mean or worst case")
     args = ap.parse_args()
 
     random.seed(args.seed)
-    arena = Problem(args.template, mode="sumo", level=args.level, rules=args.rules)
-    bench = Problem(args.template, mode="sumo", level=args.level, rules=args.rules, opponents=args.benchmark)
+    env = dict(trials=args.trials, env_seed=args.env_seed, friction_jitter=args.friction_jitter, aggregate=args.aggregate)
+    arena = Problem(args.template, mode="sumo", level=args.level, rules=args.rules, **env)
+    bench = Problem(args.template, mode="sumo", level=args.level, rules=args.rules, opponents=args.benchmark, **env)
     n = args.population
     pop = [arena.start] + [[random.random() for _ in range(arena.dim)] for _ in range(n - 1)]
     hall = []

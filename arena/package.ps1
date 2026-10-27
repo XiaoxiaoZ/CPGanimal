@@ -7,7 +7,7 @@ They need no Rust: only the programs, the Python scripts and Python 3.
 Creates dist/CPG-Arena with
     arena-gui.exe, arena.exe   the programs
     python/                    arena.py and the GA scripts
-    creatures/                 the example creatures (only files tracked by git)
+    creatures/                 the untrained example creatures (worm, walker, tailfin)
     README.md                  for students (STUDENTS.md)
     GUIDE.md                   the full guide (README.md)
 and zips it to dist/CPG-Arena.zip.
@@ -30,9 +30,14 @@ New-Item -ItemType Directory -Force (Join-Path $out "python"), (Join-Path $out "
 
 Copy-Item (Join-Path $bin "arena-gui.exe"), (Join-Path $bin "arena.exe") $out
 Copy-Item (Join-Path $PSScriptRoot "python\*.py") (Join-Path $out "python")
-# Only the examples in git, not creatures trained or designed on this computer.
+# Only the untrained examples in git: not creatures trained or designed on this
+# computer, and not the evolved examples (they have a [meta] table), so that
+# students evolve their own.
 foreach ($file in git ls-files creatures) {
-    Copy-Item (Join-Path $PSScriptRoot $file) (Join-Path $out "creatures")
+    $source = Join-Path $PSScriptRoot $file
+    if ($file -like "*.toml" -and -not (Select-String -Path $source -Pattern '^\[meta\]' -Quiet)) {
+        Copy-Item $source (Join-Path $out "creatures")
+    }
 }
 Copy-Item (Join-Path $PSScriptRoot "STUDENTS.md") (Join-Path $out "README.md")
 Copy-Item (Join-Path $PSScriptRoot "README.md") (Join-Path $out "GUIDE.md")
