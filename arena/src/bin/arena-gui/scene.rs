@@ -224,7 +224,7 @@ pub fn glow(painter: &egui::Painter, center: Pos2, radius: Vec2, color: Color32)
 }
 
 /// A filled convex polygon shaded per vertex by `color_at`.
-fn shaded_polygon(painter: &egui::Painter, points: &[Pos2], center: Pos2, center_color: Color32, color_at: impl Fn(Pos2) -> Color32) {
+pub fn shaded_polygon(painter: &egui::Painter, points: &[Pos2], center: Pos2, center_color: Color32, color_at: impl Fn(Pos2) -> Color32) {
     let mut mesh = Mesh::default();
     mesh.colored_vertex(center, center_color);
     for (k, &p) in points.iter().enumerate() {
