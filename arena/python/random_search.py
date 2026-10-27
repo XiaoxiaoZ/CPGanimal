@@ -23,9 +23,14 @@ ap.add_argument("--population", type=int, default=BATCH, help="genomes per batch
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--opponents")
 ap.add_argument("--rules")
+ap.add_argument("--trials", type=int, default=1, help="environments per evaluation (terrain seeds)")
+ap.add_argument("--env-seed", type=int, help="terrain seed of the first environment")
+ap.add_argument("--friction-jitter", type=float, default=0.0, help="random friction scale +-j per environment")
+ap.add_argument("--aggregate", default="mean", choices=["mean", "min"], help="combine environments by mean or worst case")
 args = ap.parse_args()
 
-p = Problem(args.template, mode=args.mode, level=args.level, opponents=args.opponents, rules=args.rules)
+p = Problem(args.template, mode=args.mode, level=args.level, opponents=args.opponents, rules=args.rules,
+            trials=args.trials, env_seed=args.env_seed, friction_jitter=args.friction_jitter, aggregate=args.aggregate)
 random.seed(args.seed)
 # Start from the template, then try completely random genomes and keep the best.
 # Nothing is learned from earlier tries: this is what a GA has to beat.

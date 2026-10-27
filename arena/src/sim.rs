@@ -48,7 +48,8 @@ pub struct Arena {
     pub time: f64,
     /// Static ground boxes (center, half extents) for drawing.
     pub ground: Vec<([f32; 2], [f32; 2])>,
-    /// Race terrain surface (x, y) for drawing; empty when flat.
+    /// Terrain surface (x, y) for drawing, the race track's or the sumo
+    /// platform's hills; empty when flat.
     pub terrain: Vec<[f32; 2]>,
 }
 
@@ -109,12 +110,36 @@ impl Arena {
         self.terrain = heights.iter().enumerate().map(|(i, &h)| [(X0 + i as f64 * STEP) as f32, h]).collect();
     }
 
+    /// Two wrestlers on the platform. With `terrain_roughness` the platform
+    /// has hills, mirrored around the centre so that both sides are the same
+    /// (the slope only applies to races: it would favour one side).
     pub fn sumo(c0: &Creature, c1: &Creature, rules: &Rules) -> Self {
         let mut a = Self::empty(Stage::Sumo, rules);
-        a.add_ground([0.0, -0.5], [rules.ring_width as f32 / 2.0, 0.5]);
+        let half = rules.ring_width / 2.0;
+        a.add_ground([0.0, -0.5], [half as f32, 0.5]);
+        let surface = ring_surface(rules);
+        if !surface.is_empty() {
+            let heights: Vec<f32> = surface.iter().map(|p| p[1]).collect();
+            let body = a.world.bodies.insert(RigidBodyBuilder::fixed());
+            let col = ColliderBuilder::heightfield(heights, Vec2::new((2.0 * half) as f32, 1.0))
+                .friction(rules.friction as f32)
+                .collision_groups(InteractionGroups::new(GROUND, Group::ALL, InteractionTestMode::And));
+            a.world.colliders.insert_with_parent(col, body, &mut a.world.bodies);
+            a.terrain = surface;
+        }
         a.spawn(c0, 0, -rules.sumo_start, false);
         a.spawn(c1, 1, rules.sumo_start, true);
         a
+    }
+
+    /// Height of the terrain under `x` (0 where there is none).
+    fn ground_at(&self, x: f64) -> f64 {
+        let i = self.terrain.partition_point(|p| (p[0] as f64) < x);
+        match (i.checked_sub(1).and_then(|k| self.terrain.get(k)), self.terrain.get(i)) {
+            (Some(a), Some(b)) => a[1].max(b[1]) as f64,
+            (Some(p), None) | (None, Some(p)) if (p[0] as f64 - x).abs() < 0.1 => p[1] as f64,
+            _ => 0.0,
+        }
     }
 
     /// Build a creature with its centre of area at `x`, resting just above y = 0.
@@ -128,18 +153,29 @@ impl Arena {
                 *a = PI - *a;
             }
         }
-        // Centre of area and lowest corner.
+        // Centre of area, lowest corner and horizontal extent.
         let area: f64 = c.area();
         let cx = pose.iter().zip(&c.segments).map(|((p, _), s)| p[0] * s.length * s.width).sum::<f64>() / area;
         let mut min_y = f64::INFINITY;
+        let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
         for ((p, a), s) in pose.iter().zip(&c.segments) {
             for (u, v) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
                 let (lx, ly) = (u * s.length / 2.0, v * s.width / 2.0);
                 min_y = min_y.min(p[1] + lx * a.sin() + ly * a.cos());
+                let px = p[0] + lx * a.cos() - ly * a.sin();
+                (min_x, max_x) = (min_x.min(px), max_x.max(px));
             }
         }
         let dx = x - cx;
-        let dy = 0.02 - min_y;
+        // On the sumo platform's hills, start just above the highest ground
+        // under the creature. (A race starts on flat ground.)
+        let base = if self.stage == Stage::Sumo && !self.terrain.is_empty() {
+            let n = ((max_x - min_x) / 0.05).ceil().max(1.0) as usize;
+            (0..=n).map(|i| self.ground_at(min_x + dx + (max_x - min_x) * i as f64 / n as f64)).fold(0.0, f64::max)
+        } else {
+            0.0
+        };
+        let dy = 0.02 - min_y + base;
 
         let other = TEAM[1 - team];
         let groups = InteractionGroups::new(TEAM[team], GROUND | other, InteractionTestMode::And);
@@ -341,6 +377,72 @@ pub fn terrain_height(x: f64, roughness: f64, seed: u64) -> f64 {
     let fade = ((x - 1.0) / 2.0).clamp(0.0, 1.0);
     let h = 0.7 * noise(x / 1.2, seed) + 0.3 * noise(x / 0.35, seed ^ 0xA5A5);
     roughness * fade * h
+}
+
+/// Sumo platform height at `x` (0 is the centre): the same kind of hills as
+/// the race track, mirrored so that the two halves of the platform are equal.
+pub fn ring_height(x: f64, roughness: f64, seed: u64) -> f64 {
+    terrain_height(x.abs() + 3.0, roughness, seed)
+}
+
+/// The sumo platform's surface (x, height) every 5 cm across its width, as
+/// the simulator builds it; empty when the platform is flat.
+pub fn ring_surface(rules: &Rules) -> Vec<[f32; 2]> {
+    if rules.terrain_roughness <= 0.0 {
+        return Vec::new();
+    }
+    let half = rules.ring_width / 2.0;
+    let n = (2.0 * half / 0.05).round() as usize + 1;
+    (0..n)
+        .map(|i| {
+            let x = -half + 2.0 * half * i as f64 / (n - 1) as f64;
+            [x as f32, ring_height(x, rules.terrain_roughness, rules.terrain_seed) as f32]
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::creature::Creature;
+    use std::path::Path;
+
+    fn example(name: &str) -> Creature {
+        Creature::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("creatures").join(format!("{name}.toml"))).unwrap()
+    }
+
+    #[test]
+    fn the_sumo_hills_are_the_same_on_both_sides() {
+        let rules = Rules { terrain_roughness: 0.5, terrain_seed: 4711, ..Rules::default() };
+        let s = ring_surface(&rules);
+        assert!(s.iter().any(|p| p[1] > 0.1), "there are hills");
+        for (a, b) in s.iter().zip(s.iter().rev()) {
+            assert_eq!(a[0], -b[0]);
+            assert_eq!(a[1], b[1]);
+        }
+        assert!(ring_surface(&Rules::default()).is_empty());
+    }
+
+    #[test]
+    fn wrestlers_start_on_top_of_the_hills() {
+        let rules = Rules { terrain_roughness: 0.6, terrain_seed: 77, ..Rules::default() };
+        let (worm, walker) = (example("worm"), example("walker"));
+        let a = Arena::sumo(&worm, &walker, &rules);
+        assert_eq!(a.terrain, ring_surface(&rules));
+        // No part of either creature starts inside the ground.
+        for s in a.segments() {
+            let (sin, cos) = s.angle.sin_cos();
+            for (u, v) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+                let x = s.center[0] + u * s.half[0] * cos - v * s.half[1] * sin;
+                let y = s.center[1] + u * s.half[0] * sin + v * s.half[1] * cos;
+                assert!(y as f64 >= a.ground_at(x as f64) - 1e-4, "corner ({x}, {y}) under the ground");
+            }
+        }
+        // The bout runs to a result.
+        assert!(run_sumo(&worm, &walker, &rules).time > 0.0);
+        // Flat platforms are unchanged: no terrain.
+        assert!(Arena::sumo(&worm, &walker, &Rules::default()).terrain.is_empty());
+    }
 }
 
 /// Headless race: metres travelled to the right.

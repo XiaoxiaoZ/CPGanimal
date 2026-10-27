@@ -6,7 +6,8 @@
 //! A script is started as
 //! `python -u <script> <template> --out <file> --name <name> --mode <m> --level <l>
 //! --budget <n> --population <n> --seed <n> [--opponents <folder>] [--rules <file>]`
-//! (the built-in scripts get the subset they accept). Every output line with
+//! (the built-in scripts get the subset they accept), where `python` is the
+//! command found when the program starts (python.rs) or typed in the form. Every output line with
 //! `evaluations N` (or `duels N`) and `best X`, optionally `mean Y`, becomes a
 //! point on the chart.
 //!
@@ -19,10 +20,10 @@
 //! named `<name> (<algorithm> <time>)`, so runs never overwrite each other and
 //! can be raced against each other afterwards.
 
-use super::{draw_creatures, draw_track, finished, PALETTE};
+use super::{draw_creatures, draw_track, finished, python, PALETTE};
 use clap::ValueEnum;
 use cpg_arena::creature::{Creature, Gene, GenomeSpec, Level, Rules};
-use cpg_arena::game::{self, Entry, Mode};
+use cpg_arena::game::{self, Aggregate, Entry, Environments, Mode};
 use cpg_arena::problem::Problem;
 use cpg_arena::sim::Arena;
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, Vec2};
@@ -46,6 +47,23 @@ const CANVAS_TEXT: Color32 = Color32::from_gray(165);
 
 /// Numbers the watch files of this process (one per run, unique across trainers).
 static WATCH_FILES: AtomicUsize = AtomicUsize::new(0);
+
+/// What is known about the command in the Python field. Python is looked for
+/// in the background when the program starts (see python.rs).
+enum PythonState {
+    /// Looking for Python: at the start, or after "find".
+    Searching(Receiver<Result<python::Found, Vec<String>>>),
+    /// Typed in the field; checked when the field is left.
+    Edited,
+    /// Checking the typed command.
+    Checking(Receiver<Result<String, String>>),
+    /// It starts this version of Python.
+    Works(String),
+    /// Nothing found: what each candidate said.
+    NotFound(Vec<String>),
+    /// The typed command does not start Python 3: why.
+    Broken(String),
+}
 
 #[derive(PartialEq, Clone, Copy)]
 enum Script {
@@ -175,6 +193,22 @@ struct Record {
     fitness: Vec<Option<f64>>,
     /// Evaluations (or duels) the script has used so far.
     evaluations: Option<usize>,
+    /// The environments each individual was evaluated in (see game::Environments).
+    trials: Option<usize>,
+    env_seed: Option<u64>,
+    friction_jitter: Option<f64>,
+    aggregate: Option<String>,
+}
+
+impl Record {
+    fn environments(&self) -> Environments {
+        Environments {
+            trials: self.trials.unwrap_or(1).max(1),
+            first_seed: self.env_seed,
+            friction_jitter: self.friction_jitter.unwrap_or(0.0),
+            aggregate: if self.aggregate.as_deref() == Some("min") { Aggregate::Min } else { Aggregate::Mean },
+        }
+    }
 }
 
 /// Where a recorded population is replayed, and what its genes mean.
@@ -191,10 +225,20 @@ struct Setting {
     genes: Vec<Gene>,
     /// The template as a genome: where evolution starts.
     start: Option<Vec<f64>>,
+    /// How many environments each individual was evaluated in; the replay shows the first.
+    trials: usize,
 }
 
 impl Setting {
     fn new(r: &Record) -> Result<Self, String> {
+        let s = Self::load(r)?;
+        // Replay in the first environment the script used (its terrain seed and friction).
+        let env = r.environments();
+        let rules = env.variants(&s.rules).swap_remove(0);
+        Ok(Self { rules, trials: env.trials, ..s })
+    }
+
+    fn load(r: &Record) -> Result<Self, String> {
         let mode = <Mode as ValueEnum>::from_str(&r.mode, true)?;
         let sumo = mode == Mode::Sumo;
         if r.kind == "genomes" {
@@ -203,7 +247,7 @@ impl Setting {
             let p = Problem::load(template, mode, level, r.opponents.as_deref(), r.rules.as_deref())?;
             let opponent = p.opponents.first().cloned().unwrap_or_else(game::rock);
             let (genes, start, opponents) = (p.spec.genes(&p.template, &p.rules), Some(p.start()), p.opponents.len().max(1));
-            Ok(Self { rules: p.rules.clone(), sumo, opponent, opponents, problem: Some(p), level, genes, start })
+            Ok(Self { rules: p.rules.clone(), sumo, opponent, opponents, problem: Some(p), level, genes, start, trials: 1 })
         } else {
             let rules = match &r.rules {
                 Some(p) => Rules::load_file(p)?,
@@ -218,7 +262,7 @@ impl Setting {
             let opponent = found.into_iter().next().unwrap_or_else(game::rock);
             // Whole creatures are shown as structure-level genomes, whose genes don't depend on the creature.
             let genes = GenomeSpec { level: Level::Structure }.genes(&opponent, &rules);
-            Ok(Self { rules, sumo, opponent, opponents, problem: None, level: Level::Structure, genes, start: None })
+            Ok(Self { rules, sumo, opponent, opponents, problem: None, level: Level::Structure, genes, start: None, trials: 1 })
         }
     }
 }
@@ -254,6 +298,8 @@ struct Run {
     generations: Vec<Generation>,
     /// Temporary folder with copies of the chosen sumo opponents.
     opponents: Option<PathBuf>,
+    /// Temporary rules file for training on an environment seed.
+    rules_file: Option<PathBuf>,
 }
 
 impl Run {
@@ -327,7 +373,10 @@ impl Run {
 
     fn add_generation(&mut self, r: Record) {
         self.evaluated = r.evaluations.unwrap_or(self.evaluated + r.genomes.len().max(r.creatures.len()));
-        let key = format!("{}|{}|{:?}|{:?}|{:?}|{:?}", r.kind, r.mode, r.template, r.level, r.opponents, r.rules);
+        let key = format!(
+            "{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            r.kind, r.mode, r.template, r.level, r.opponents, r.rules, r.trials, r.env_seed, r.friction_jitter, r.aggregate
+        );
         let setting = match self.settings.get(&key) {
             Some(s) => s.clone(),
             None => {
@@ -387,6 +436,9 @@ impl Drop for Run {
         }
         if let Some(d) = &self.opponents {
             std::fs::remove_dir_all(d).ok();
+        }
+        if let Some(f) = &self.rules_file {
+            std::fs::remove_file(f).ok();
         }
     }
 }
@@ -540,7 +592,9 @@ fn follow(camera: &mut Option<(f32, f32)>, target: (f32, f32)) -> (f32, f32) {
 }
 
 pub struct Trainer {
+    /// The command that starts Python, e.g. `python`, `py -3` or a path to python.exe.
     python: String,
+    python_state: PythonState,
     /// The `python/` folder with arena.py, ga.py, my_ga.py, ...
     scripts: Option<PathBuf>,
     /// The `arena` binary next to this one, so Python uses the same build.
@@ -554,6 +608,13 @@ pub struct Trainer {
     generations: u32,
     population: u32,
     seed: u32,
+    /// The track to train on: the folder's, or an environment seed.
+    track: super::environment::TrackChoice,
+    /// Training environments: terrains per evaluation, friction varied by
+    /// +-this fraction, worst case instead of average.
+    trials: u32,
+    friction_jitter: f64,
+    worst: bool,
     /// Sumo: fight the Rock, or the creatures ticked in `chosen`.
     vs_rock: bool,
     chosen: HashSet<PathBuf>,
@@ -582,8 +643,9 @@ impl Trainer {
             .ok()
             .map(|exe| exe.with_file_name(format!("arena{}", std::env::consts::EXE_SUFFIX)))
             .filter(|p| p.is_file());
-        Self {
+        let mut trainer = Self {
             python: if cfg!(windows) { "python" } else { "python3" }.into(),
+            python_state: PythonState::Edited,
             scripts,
             arena_bin,
             script: Script::Ga,
@@ -595,6 +657,10 @@ impl Trainer {
             generations: 30,
             population: 50,
             seed: 1,
+            trials: 1,
+            track: super::environment::TrackChoice::new(),
+            friction_jitter: 0.0,
+            worst: false,
             vs_rock: true,
             chosen: HashSet::new(),
             save_dir,
@@ -609,11 +675,104 @@ impl Trainer {
             replay: None,
             camera: None,
             bottom: Bottom::Fitness,
-        }
+        };
+        trainer.find_python();
+        trainer
     }
 
-    /// Drain the output of running scripts; true while any is still going.
+    /// Look for Python in the background; the result replaces the Python field.
+    fn find_python(&mut self) {
+        let (tx, rx) = channel();
+        std::thread::spawn(move || tx.send(python::find()).ok());
+        self.python_state = PythonState::Searching(rx);
+    }
+
+    /// Check the command typed in the Python field in the background.
+    fn check_python(&mut self) {
+        let (tx, rx) = channel();
+        let command = self.python.clone();
+        std::thread::spawn(move || tx.send(python::check(&command)).ok());
+        self.python_state = PythonState::Checking(rx);
+    }
+
+    /// Take the result of a search or check; true while one is still going.
+    fn poll_python(&mut self) -> bool {
+        let next = match &self.python_state {
+            PythonState::Searching(rx) => match rx.try_recv() {
+                Ok(Ok(found)) => {
+                    self.python = found.command;
+                    PythonState::Works(found.version)
+                }
+                Ok(Err(tried)) => PythonState::NotFound(tried),
+                Err(TryRecvError::Empty) => return true,
+                Err(TryRecvError::Disconnected) => PythonState::NotFound(Vec::new()),
+            },
+            PythonState::Checking(rx) => match rx.try_recv() {
+                Ok(Ok(version)) => PythonState::Works(version),
+                Ok(Err(why)) => PythonState::Broken(why),
+                Err(TryRecvError::Empty) => return true,
+                Err(TryRecvError::Disconnected) => PythonState::Edited,
+            },
+            _ => return false,
+        };
+        self.python_state = next;
+        false
+    }
+
+    /// The Python field, with what is known about it and a button to look again.
+    fn python_form(&mut self, ui: &mut egui::Ui) {
+        ui.label("Python");
+        let edit = ui.add(egui::TextEdit::singleline(&mut self.python).desired_width(170.0)).on_hover_text(
+            "The command that starts Python 3. It is found by itself; to use another Python, type its command \
+             (e.g. py -3) or the path to its python.exe.",
+        );
+        if edit.changed() {
+            self.python_state = PythonState::Edited;
+        }
+        if edit.lost_focus() && matches!(self.python_state, PythonState::Edited) {
+            self.check_python();
+        }
+        ui.end_row();
+        ui.label("");
+        ui.horizontal(|ui| {
+            let searching = matches!(self.python_state, PythonState::Searching(_));
+            match &self.python_state {
+                PythonState::Searching(_) => {
+                    ui.spinner();
+                    ui.label(RichText::new("looking for Python…").small());
+                }
+                PythonState::Checking(_) => {
+                    ui.spinner();
+                    ui.label(RichText::new("checking…").small());
+                }
+                PythonState::Edited => {
+                    ui.label(RichText::new("press Enter to check").small().weak());
+                }
+                PythonState::Works(version) => {
+                    ui.label(RichText::new(format!("Python {version}")).small().color(Color32::from_rgb(120, 180, 120)))
+                        .on_hover_text(format!("Training starts {}", self.python.trim()));
+                }
+                PythonState::NotFound(tried) => {
+                    let label = ui.label(RichText::new("Python 3 not found").small().color(Color32::LIGHT_RED));
+                    if !tried.is_empty() {
+                        label.on_hover_text(format!("Tried:\n{}", tried.join("\n")));
+                    }
+                }
+                PythonState::Broken(why) => {
+                    ui.label(RichText::new("does not start Python 3").small().color(Color32::LIGHT_RED)).on_hover_text(why);
+                }
+            }
+            if ui.add_enabled(!searching, egui::Button::new("find").small()).on_hover_text("Look for Python again, e.g. after installing it").clicked() {
+                self.find_python();
+            }
+        });
+        ui.end_row();
+    }
+
+    /// Drain the output of running scripts; true while any is still going
+    /// (or Python is still being looked for).
     pub fn poll(&mut self) -> bool {
+        let python = self.poll_python();
         for r in &mut self.runs {
             let failed = matches!(r.status, Status::Failed(_));
             r.poll();
@@ -622,7 +781,7 @@ impl Trainer {
                 self.bottom = Bottom::Output;
             }
         }
-        self.runs.iter().any(Run::active)
+        python || self.runs.iter().any(Run::active)
     }
 
     fn busy(&self) -> bool {
@@ -657,6 +816,54 @@ impl Trainer {
         }
     }
 
+    /// The track to train on, and training on several of its terrains so that
+    /// evolution does not overfit one.
+    fn environment_form(&mut self, ui: &mut egui::Ui, rules: &Rules, class: bool) {
+        self.track.ui(ui, class);
+        let track = self.track.rules(rules);
+        let summary = if self.trials == 1 && self.friction_jitter == 0.0 {
+            "one terrain".to_string()
+        } else {
+            let mut s = format!("{} terrain{}", self.trials, if self.trials > 1 { "s" } else { "" });
+            if self.friction_jitter > 0.0 {
+                s += &format!(", friction ±{:.0}%", self.friction_jitter * 100.0);
+            }
+            if self.worst {
+                s += ", worst case";
+            }
+            s
+        };
+        egui::CollapsingHeader::new(format!("Training environments: {summary}")).id_salt("train_env").show(ui, |ui| {
+            egui::Grid::new("train_env_grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                ui.label("Terrains").on_hover_text("Each individual is tested on this many terrains; its fitness combines the results");
+                ui.add(egui::DragValue::new(&mut self.trials).range(1..=20));
+                ui.end_row();
+                ui.label("Friction ±").on_hover_text("Each environment's friction is scaled by a random factor in 1 ± this");
+                ui.add(egui::Slider::new(&mut self.friction_jitter, 0.0..=0.5).step_by(0.05).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+                ui.end_row();
+                ui.label("Combine");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.worst, false, "average").on_hover_text("Good on typical terrain");
+                    ui.selectable_value(&mut self.worst, true, "worst case").on_hover_text("Never bad on any terrain");
+                });
+                ui.end_row();
+            });
+            ui.label(
+                RichText::new(
+                    "Terrain k is the track's terrain + k: the same hill height and slope, other hill shapes. Each evaluation \
+                     runs one simulation per terrain, so training takes that many times longer; the budget still counts individuals.",
+                )
+                .small()
+                .weak(),
+            );
+            let flat = track.terrain_roughness <= 0.0;
+            if self.trials > 1 && flat && self.friction_jitter == 0.0 {
+                let why = if self.sumo() { "This platform is flat (no hills)" } else { "This track is flat (no hills)" };
+                ui.colored_label(ui.visuals().warn_fg_color, format!("{why}, so all terrains are the same: choose an environment seed (it has hills), or vary the friction."));
+            }
+        });
+    }
+
     /// Train this creature next, e.g. one just made in the Design tab.
     pub fn use_template(&mut self, path: &Path, entries: &[Entry]) {
         if let Some(e) = entries.iter().find(|e| e.path.file_name() == path.file_name()) {
@@ -666,7 +873,7 @@ impl Trainer {
     }
 
     /// The Train form and the list of runs. Returns true when the user asks to open the creatures folder.
-    pub fn panel(&mut self, ui: &mut egui::Ui, folder: &Path, entries: &[Entry]) -> bool {
+    pub fn panel(&mut self, ui: &mut egui::Ui, folder: &Path, entries: &[Entry], rules: &Rules) -> bool {
         let mut open_creatures = false;
         ui.heading("Train");
         ui.label("Evolve a creature with a Python script. Each champion is saved as a new creature in the creatures folder, with the time in its name.");
@@ -760,10 +967,18 @@ impl Trainer {
             ui.label("Extra args");
             ui.add(egui::TextEdit::singleline(&mut self.extra).desired_width(170.0).hint_text("e.g. --sigma 0.2"));
             ui.end_row();
-            ui.label("Python");
-            ui.add(egui::TextEdit::singleline(&mut self.python).desired_width(170.0));
-            ui.end_row();
+            self.python_form(ui);
         });
+        if matches!(self.python_state, PythonState::NotFound(_)) {
+            ui.label(
+                RichText::new(
+                    "Training needs Python 3: install it from python.org (tick \"Add python.exe to PATH\"), then press find. \
+                     Or type the path to python.exe in the Python field.",
+                )
+                .small()
+                .weak(),
+            );
+        }
         if new_template {
             self.reset_name(entries);
         }
@@ -781,6 +996,8 @@ impl Trainer {
                 self.script = Script::Structure;
             }
         }
+        let class = folder.join("arena.toml").is_file();
+        self.environment_form(ui, rules, class);
         let choosing = self.sumo() && !self.vs_rock;
         if choosing {
             ui.horizontal(|ui| {
@@ -811,8 +1028,12 @@ impl Trainer {
         ui.checkbox(&mut self.watch, "Watch the population while training")
             .on_hover_text("Replay each generation: every individual drawn faintly, the best one highlighted.");
 
-        let rules = folder.join("arena.toml").is_file();
-        ui.label(RichText::new(if rules { "Rules: arena.toml in this folder" } else { "Rules: defaults (no arena.toml in this folder)" }).small().weak());
+        let track = if self.sumo() {
+            self.track.describe_sumo(rules, class)
+        } else {
+            self.track.describe(rules, class)
+        };
+        ui.label(RichText::new(track).small().weak());
         let problem = if valid.is_empty() {
             Some("No valid creature in this folder to start from.".to_string())
         } else if choosing && ticked == 0 {
@@ -822,8 +1043,10 @@ impl Trainer {
         };
         ui.horizontal(|ui| {
             let busy = self.busy();
-            if ui.add_enabled(problem.is_none() && !busy, egui::Button::new("▶ Train")).clicked() {
-                self.start(folder);
+            let searching = matches!(self.python_state, PythonState::Searching(_));
+            let train = ui.add_enabled(problem.is_none() && !busy && !searching, egui::Button::new("▶ Train"));
+            if train.on_disabled_hover_text(if searching { "Looking for Python…" } else { "" }).clicked() {
+                self.start(folder, rules);
             }
             if ui.add_enabled(busy, egui::Button::new("■ Stop")).clicked() {
                 for r in &mut self.runs {
@@ -891,7 +1114,7 @@ impl Trainer {
         open_creatures
     }
 
-    fn start(&mut self, folder: &Path) {
+    fn start(&mut self, folder: &Path, rules: &Rules) {
         let (Some(template), Ok(script)) = (self.template.clone(), self.script_path()) else { return };
         let folder = absolute(folder);
         let now = chrono::Local::now();
@@ -943,16 +1166,45 @@ impl Trainer {
         if let Some(dir) = &opponents {
             flag(if self.script == Script::Coevolve { "--benchmark" } else { "--opponents" }, dir.clone().into());
         }
-        let rules = folder.join("arena.toml");
-        if rules.is_file() {
-            flag("--rules", rules.into());
+        if self.trials > 1 {
+            flag("--trials", self.trials.to_string().into());
+        }
+        if self.friction_jitter > 0.0 {
+            flag("--friction-jitter", self.friction_jitter.to_string().into());
+        }
+        if self.worst {
+            flag("--aggregate", "min".into());
+        }
+        // The rules: the folder's arena.toml, or with an environment seed the
+        // folder's rules on that environment, written to a file of their own.
+        let mut setup_error = None;
+        let rules_file = if self.track.seeded {
+            let path = std::env::temp_dir().join(format!("arena-gui-rules-{}-{}.toml", std::process::id(), WATCH_FILES.fetch_add(1, Ordering::Relaxed)));
+            match toml::to_string(&self.track.rules(rules)).map_err(|e| e.to_string()).and_then(|text| std::fs::write(&path, text).map_err(|e| e.to_string())) {
+                Ok(()) => Some(path),
+                Err(e) => {
+                    setup_error = Some(format!("could not write the environment's rules: {e}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let arena_toml = folder.join("arena.toml");
+        if let Some(path) = &rules_file {
+            flag("--rules", path.clone().into());
+        } else if arena_toml.is_file() {
+            flag("--rules", arena_toml.into());
         }
         args.extend(self.extra.split_whitespace().map(OsString::from));
 
         // Populations are always recorded, so Watch can also be switched on afterwards.
         let watch = std::env::temp_dir().join(format!("arena-gui-{}-{}.jsonl", std::process::id(), WATCH_FILES.fetch_add(1, Ordering::Relaxed)));
         std::fs::remove_file(&watch).ok();
-        let mut cmd = Command::new(self.python.trim());
+        let mut cmd = python::command(&self.python).unwrap_or_else(|| {
+            setup_error.get_or_insert("Type the command that starts Python in the Python field.".into());
+            Command::new("python")
+        });
         cmd.args(&args)
             .env("PYTHONUTF8", "1")
             .env("ARENA_WATCH", &watch)
@@ -984,6 +1236,12 @@ impl Trainer {
         if self.script.has_level() && self.level != "brain" {
             label += &format!(" · {}", self.level);
         }
+        if self.track.seeded {
+            label += &format!(" · env {}", self.track.seed);
+        }
+        if self.trials > 1 {
+            label += &format!(" · {} terrains", self.trials);
+        }
         label += &format!(" · seed {} · {}", self.seed, now.format("%H:%M:%S"));
         let c = PALETTE[self.started % PALETTE.len()];
         self.started += 1;
@@ -1003,6 +1261,7 @@ impl Trainer {
             evaluated: 0,
             generations: Vec::new(),
             opponents,
+            rules_file,
         };
         let shown: Vec<String> = args
             .iter()
@@ -1012,6 +1271,14 @@ impl Trainer {
             })
             .collect();
         run.push(format!("> {} {}", self.python.trim(), shown.join(" ")), false);
+        if let Some(e) = setup_error {
+            run.push(e, true);
+            run.status = Status::Failed("could not start".into());
+            self.bottom = Bottom::Output;
+            self.runs.push(run);
+            self.shown = Some(self.runs.len() - 1);
+            return;
+        }
         match cmd.spawn() {
             Ok(mut child) => {
                 let (tx, rx) = channel();
@@ -1026,7 +1293,12 @@ impl Trainer {
             }
             Err(e) => {
                 run.push(format!("could not start `{}`: {e}", self.python.trim()), true);
-                run.push("Is Python installed? Set the Python command in the form (python, python3 or py).".into(), true);
+                run.push(
+                    "Is Python 3 installed? Install it from python.org (tick \"Add python.exe to PATH\") and press find \
+                     next to the Python field, or type the path to python.exe there."
+                        .into(),
+                    true,
+                );
                 run.status = Status::Failed("could not start Python".into());
                 self.bottom = Bottom::Output;
             }
@@ -1093,13 +1365,13 @@ impl Trainer {
     }
 
     /// Population playback (when watching), then the Fitness / DNA / Output views.
-    pub fn view(&mut self, ui: &mut egui::Ui) {
+    pub fn view(&mut self, ui: &mut egui::Ui, rules: &Rules) {
         if self.watch {
             // Smaller while the DNA table needs the room.
             let share = if self.bottom == Bottom::Dna { 0.3 } else { 0.42 };
             let size = Vec2::new(ui.available_width(), (ui.available_height() * share).max(160.0));
             let (resp, painter) = ui.allocate_painter(size, Sense::hover());
-            self.draw_population(&painter, resp.rect);
+            self.draw_population(&painter, resp.rect, rules);
         }
         if self.watch || self.bottom == Bottom::Dna {
             self.generation_bar(ui);
@@ -1186,12 +1458,57 @@ impl Trainer {
         });
     }
 
-    fn draw_population(&mut self, painter: &egui::Painter, rect: Rect) {
+    /// The tracks training will use: the chosen track and its Training environments.
+    fn environments(&self, rules: &Rules) -> Vec<Rules> {
+        let env = Environments {
+            trials: self.trials as usize,
+            first_seed: None,
+            friction_jitter: self.friction_jitter,
+            aggregate: if self.worst { Aggregate::Min } else { Aggregate::Mean },
+        };
+        env.variants(&self.track.rules(rules))
+    }
+
+    /// Before there is a population to replay: the tracks training will use.
+    fn draw_training_tracks(&self, painter: &egui::Painter, rect: Rect, rules: &Rules) {
+        let tracks = self.environments(rules);
+        let n = tracks.len();
+        let head = if n == 1 { "The training track".to_string() } else { format!("The {n} training tracks") };
+        painter.text(rect.left_top() + Vec2::new(10.0, 8.0), Align2::LEFT_TOP, head, FontId::proportional(15.0), Color32::WHITE);
+        let hint = if self.shown.is_some() { "No population recorded yet." } else { "Press ▶ Train to watch the population evolve on them." };
+        painter.text(rect.left_top() + Vec2::new(10.0, 28.0), Align2::LEFT_TOP, hint, FontId::proportional(13.0), CANVAS_TEXT);
+        // One strip per track, at most four; the rest are listed.
+        let shown = n.min(4);
+        let top = rect.top() + 48.0;
+        let h = (rect.bottom() - top) / shown as f32;
+        for (k, r) in tracks.iter().take(shown).enumerate() {
+            let strip = Rect::from_min_size(Pos2::new(rect.left(), top + k as f32 * h), Vec2::new(rect.width(), h));
+            let p = painter.with_clip_rect(strip.intersect(rect));
+            if k % 2 == 1 {
+                p.rect_filled(strip, 0.0, Color32::from_rgb(33, 38, 48));
+            }
+            let track = super::environment::Track::of(r);
+            let label = if self.sumo() {
+                super::environment::draw_ring(&p, strip, r);
+                format!("{}: {}", k + 1, track.describe_ring())
+            } else {
+                let inner = Rect::from_min_max(strip.min + Vec2::new(24.0, 24.0), strip.max - Vec2::new(24.0, 18.0));
+                super::environment::draw_terrain(&p, inner, r, super::scene::Backdrop::Stadium);
+                format!("{}: {}", k + 1, track.describe())
+            };
+            super::scene::shadow_text(&p, strip.left_top() + Vec2::new(10.0, 4.0), Align2::LEFT_TOP, label, FontId::proportional(13.0), Color32::WHITE);
+        }
+        if n > shown {
+            let more = format!("and {} more: terrains {} to {}", n - shown, tracks[shown].terrain_seed, tracks[n - 1].terrain_seed);
+            painter.text(rect.right_bottom() - Vec2::new(10.0, 6.0), Align2::RIGHT_BOTTOM, more, FontId::proportional(13.0), CANVAS_TEXT);
+        }
+    }
+
+    fn draw_population(&mut self, painter: &egui::Painter, rect: Rect, rules: &Rules) {
         let painter = painter.with_clip_rect(rect);
         painter.rect_filled(rect, 0.0, Color32::from_rgb(28, 32, 40));
         let Some(r) = &self.replay else {
-            let hint = if self.shown.is_some() { "No population recorded yet." } else { "Press ▶ Train to watch the population evolve." };
-            painter.text(rect.center(), Align2::CENTER_CENTER, hint, FontId::proportional(16.0), Color32::from_gray(160));
+            self.draw_training_tracks(&painter, rect, rules);
             return;
         };
         let run = &self.runs[r.run];
@@ -1205,9 +1522,8 @@ impl Trainer {
             let scale = (rect.width() / (ring + 3.0)).min(rect.height() / 3.0);
             let ground_y = rect.top() + rect.height() * 0.62;
             let to_screen = |p: [f32; 2]| Pos2::new(rect.center().x + p[0] * scale, ground_y - p[1] * scale);
-            let half = ring / 2.0;
-            painter.rect_filled(Rect::from_two_pos(to_screen([-half, 0.0]), to_screen([half, -1.0])), 2.0, Color32::from_rgb(170, 140, 100));
-            painter.line_segment([to_screen([0.0, 0.0]), to_screen([0.0, -0.15])], Stroke::new(2.0, Color32::WHITE));
+            super::scene::sky(&painter, rect, ground_y, 0.0, scale);
+            super::draw_ring(&painter, top, &to_screen, scale);
             let colors = [run.color, Color32::from_gray(150)];
             for (i, a) in r.arenas.iter().enumerate() {
                 if i != best {
@@ -1247,6 +1563,9 @@ impl Trainer {
             if s.opponents > 1 {
                 sub += &format!(" (the first of {} opponents)", s.opponents);
             }
+        }
+        if s.trials > 1 {
+            sub += &format!(" · shown on terrain 1 of the {} it was trained on", s.trials);
         }
         painter.text(rect.left_top() + Vec2::new(10.0, 28.0), Align2::LEFT_TOP, sub, label.clone(), CANVAS_TEXT);
         painter.text(rect.right_top() + Vec2::new(-10.0, 8.0), Align2::RIGHT_TOP, format!("t = {time:.1} / {limit:.0} s"), FontId::proportional(15.0), Color32::WHITE);
@@ -1614,15 +1933,40 @@ mod tests {
         let file = format!("{creature}.toml");
         std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("creatures").join(&file), dir.join(&file)).unwrap();
         let mut t = Trainer::new(dir.clone());
+        // Like the Train button, wait until Python is found.
+        wait_for_python(&mut t);
+        assert!(matches!(t.python_state, PythonState::Works(_)), "Python not found");
         t.template = Some(dir.join(&file));
         setup(&mut t);
-        t.start(&dir);
+        t.start(&dir, &Rules::load_dir(&dir).unwrap());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         while t.poll() {
             assert!(std::time::Instant::now() < deadline, "timed out");
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         (t, dir)
+    }
+
+    fn wait_for_python(t: &mut Trainer) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while t.poll_python() {
+            assert!(std::time::Instant::now() < deadline, "timed out");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    #[ignore = "needs Python"]
+    fn looks_for_python_at_the_start_and_checks_a_typed_command() {
+        let mut t = Trainer::new(std::env::temp_dir());
+        wait_for_python(&mut t);
+        let PythonState::Works(version) = &t.python_state else { panic!("Python not found") };
+        assert_eq!(python::check(&t.python).as_ref(), Ok(version));
+        // A typed command that does not start Python is reported.
+        t.python = "arena-certainly-not-python".into();
+        t.check_python();
+        wait_for_python(&mut t);
+        assert!(matches!(t.python_state, PythonState::Broken(_)));
     }
 
     #[test]
@@ -1645,12 +1989,50 @@ mod tests {
 
     #[test]
     #[ignore = "needs Python and a release build of the arena binary"]
-    fn my_ga_runs_like_the_default_ga() {
-        let (t, _) = train("arena-gui-train-my-ga", "worm", |t| {
-            (t.script, t.budget, t.population, t.name, t.extra) = (Script::MyGa, 100, 20, "Worm".into(), "--sigma 0.2".into());
+    fn trains_on_an_environment_seed_and_several_terrains() {
+        use crate::environment::{Track, TrackChoice};
+        let (t, _) = train("arena-gui-train-envs", "worm", |t| {
+            let dir = std::env::temp_dir().join("arena-gui-train-envs");
+            std::fs::write(dir.join("arena.toml"), "race_time = 10.0\n").unwrap();
+            (t.budget, t.population, t.name) = (60, 20, "Worm".into());
+            t.track = TrackChoice { seeded: true, seed: 10 };
+            (t.trials, t.friction_jitter, t.worst) = (3, 0.2, true);
         });
         let run = &t.runs[0];
         assert!(run.status == Status::Done, "{:#?}", run.log);
+        assert!(run.label.contains("env 10") && run.label.contains("3 terrains"), "{}", run.label);
+        let command = &run.log[0].0;
+        for option in ["--trials 3", "--friction-jitter 0.2", "--aggregate min", "--rules"] {
+            assert!(command.contains(option), "{option} missing in {command}");
+        }
+        // The script trained on environment 10 with the folder's other rules; the replay
+        // shows its first terrain (environment 10's terrain, with the friction varied).
+        let env = Track::random(10).apply(&Rules::default());
+        let s = &run.generations[0].setting;
+        assert_eq!((s.trials, s.rules.terrain_seed, s.rules.terrain_roughness, s.rules.slope), (3, 10, env.terrain_roughness, env.slope));
+        assert_eq!(s.rules.race_time, 10.0);
+        assert_ne!(s.rules.friction, env.friction);
+        // The temporary rules file goes with the run.
+        let file = run.rules_file.clone().unwrap();
+        assert!(file.is_file());
+        drop(t);
+        assert!(!file.exists());
+    }
+
+    #[test]
+    #[ignore = "needs Python and a release build of the arena binary"]
+    fn my_ga_runs_like_the_default_ga() {
+        // Where it can, start Python with a command that has an argument (`py -3`).
+        let launcher = python::check("py -3").is_ok();
+        let (t, _) = train("arena-gui-train-my-ga", "worm", |t| {
+            (t.script, t.budget, t.population, t.name, t.extra) = (Script::MyGa, 100, 20, "Worm".into(), "--sigma 0.2".into());
+            if launcher {
+                t.python = "py -3".into();
+            }
+        });
+        let run = &t.runs[0];
+        assert!(run.status == Status::Done, "{:#?}", run.log);
+        assert!(!launcher || run.log[0].0.starts_with("> py -3 -u "), "{}", run.log[0].0);
         // Same loop and output as ga.py: generation 0 is reported, the budget is never exceeded.
         assert_eq!(run.points.first().unwrap()[0], 20.0);
         assert!(run.points.iter().all(|p| p[0] <= 100.0) && run.generations.len() == run.points.len());

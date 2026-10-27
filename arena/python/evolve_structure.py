@@ -119,10 +119,15 @@ def main():
     ap.add_argument("--mu", type=int, default=10, help="parents kept each generation")
     ap.add_argument("--lam", type=int, default=40, help="children per generation")
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--trials", type=int, default=1, help="environments per evaluation (terrain seeds)")
+    ap.add_argument("--env-seed", type=int, help="terrain seed of the first environment")
+    ap.add_argument("--friction-jitter", type=float, default=0.0, help="random friction scale +-j per environment")
+    ap.add_argument("--aggregate", default="mean", choices=["mean", "min"], help="combine environments by mean or worst case")
     args = ap.parse_args()
 
     random.seed(args.seed)
-    judge = Judge(mode=args.mode, opponents=args.opponents, rules=args.rules)
+    judge = Judge(mode=args.mode, opponents=args.opponents, rules=args.rules, trials=args.trials,
+                  env_seed=args.env_seed, friction_jitter=args.friction_jitter, aggregate=args.aggregate)
     rules = judge.rules
     start = load_creature(args.template)
     start["name"] = args.name
