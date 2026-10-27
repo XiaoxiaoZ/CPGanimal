@@ -384,13 +384,24 @@ pub enum Marks {
     Labels,
 }
 
-/// A race track seen from the side: sky, hills of earth with grass, distance
-/// marks and the start flag. `ground_y` is the screen y of height 0.
+/// What is behind a race track.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Backdrop {
+    /// The evening sky over the stadium.
+    Stadium,
+    /// Nothing: the plain background that is already there.
+    Plain,
+}
+
+/// A race track seen from the side: the backdrop, hills of earth with grass,
+/// distance marks and the start flag. `ground_y` is the screen y of height 0.
 #[allow(clippy::too_many_arguments)]
-pub fn track(painter: &egui::Painter, lane: Rect, ground_y: f32, to_screen: &impl Fn([f32; 2]) -> Pos2, (x0, x1): (f32, f32), scale: f32, terrain: &[[f32; 2]], marks: Marks) {
+pub fn track(painter: &egui::Painter, lane: Rect, ground_y: f32, to_screen: &impl Fn([f32; 2]) -> Pos2, (x0, x1): (f32, f32), scale: f32, terrain: &[[f32; 2]], marks: Marks, backdrop: Backdrop) {
     let painter = &painter.with_clip_rect(lane.intersect(painter.clip_rect()));
-    let highest = terrain.iter().filter(|p| p[0] >= x0 && p[0] <= x1).map(|p| p[1]).fold(0.0f32, f32::max);
-    sky(painter, lane, ground_y - highest * scale * 0.5, (x0 + x1) / 2.0, scale);
+    if backdrop == Backdrop::Stadium {
+        let highest = terrain.iter().filter(|p| p[0] >= x0 && p[0] <= x1).map(|p| p[1]).fold(0.0f32, f32::max);
+        sky(painter, lane, ground_y - highest * scale * 0.5, (x0 + x1) / 2.0, scale);
+    }
     // The surface, sampled every few pixels.
     let step = (3.0 / scale).max(0.02);
     let n = ((x1 - x0) / step).ceil() as usize + 3;

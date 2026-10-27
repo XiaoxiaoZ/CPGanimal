@@ -1493,7 +1493,7 @@ impl Trainer {
                 format!("{}: {}", k + 1, track.describe_ring())
             } else {
                 let inner = Rect::from_min_max(strip.min + Vec2::new(24.0, 24.0), strip.max - Vec2::new(24.0, 18.0));
-                super::environment::draw_terrain(&p, inner, r);
+                super::environment::draw_terrain(&p, inner, r, super::scene::Backdrop::Stadium);
                 format!("{}: {}", k + 1, track.describe())
             };
             super::scene::shadow_text(&p, strip.left_top() + Vec2::new(10.0, 4.0), Align2::LEFT_TOP, label, FontId::proportional(13.0), Color32::WHITE);

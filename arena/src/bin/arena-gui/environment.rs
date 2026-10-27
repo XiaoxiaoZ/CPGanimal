@@ -137,7 +137,7 @@ impl TrackChoice {
 /// The first 20 m of a race track as the simulator builds it (hills from
 /// `rules`' terrain), tilted by the slope and fitted into `inner`. The ground
 /// reaches past `inner`; the painter's clip rect cuts it off.
-pub fn draw_terrain(painter: &egui::Painter, inner: Rect, rules: &Rules) {
+pub fn draw_terrain(painter: &egui::Painter, inner: Rect, rules: &Rules, backdrop: scene::Backdrop) {
     let t = Track::of(rules);
     let (sin, cos) = t.slope.to_radians().sin_cos();
     let tilt = |x: f64, y: f64| [x * cos - y * sin, x * sin + y * cos];
@@ -160,8 +160,10 @@ pub fn draw_terrain(painter: &egui::Painter, inner: Rect, rules: &Rules) {
         Pos2::new(inner.center().x + ((p[0] - mid[0]) * scale) as f32, inner.center().y - ((p[1] - mid[1]) * scale) as f32)
     };
     // The sky behind, then the earth: the surface reaching well below.
-    let horizon = to_screen((PREVIEW.0 + PREVIEW.1) / 2.0, 0.0).y;
-    scene::sky(painter, painter.clip_rect(), horizon, 0.0, scale as f32);
+    if backdrop == scene::Backdrop::Stadium {
+        let horizon = to_screen((PREVIEW.0 + PREVIEW.1) / 2.0, 0.0).y;
+        scene::sky(painter, painter.clip_rect(), horizon, 0.0, scale as f32);
+    }
     let ground: Vec<[f32; 2]> = surface.iter().map(|p| [p[0] as f32, p[1] as f32]).collect();
     scene::earth(painter, &ground, &|p: [f32; 2]| to_screen(p[0] as f64, p[1] as f64), scale as f32, true);
     for m in (0..=PREVIEW.1 as i32).step_by(5) {

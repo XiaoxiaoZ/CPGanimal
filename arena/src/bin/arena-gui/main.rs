@@ -633,8 +633,8 @@ impl App {
         } else if !self.race.is_empty() {
             self.draw_race(&painter, rect);
         } else if self.tab == Tab::Race {
-            // The track the next race will run on.
-            environment::draw_terrain(&painter, rect.shrink2(Vec2::new(30.0, 70.0)), &self.race_choice.rules(&self.rules));
+            // The track the next race will run on, on the Race tab's plain background.
+            environment::draw_terrain(&painter, rect.shrink2(Vec2::new(30.0, 70.0)), &self.race_choice.rules(&self.rules), scene::Backdrop::Plain);
             let head = if self.race_choice.seeded && self.race_new_each {
                 "A new environment for every race; this is the next one.".to_string()
             } else {
@@ -662,7 +662,8 @@ impl App {
         cam
     }
 
-    /// One lane per racer, all sharing the same horizontal camera.
+    /// One lane per racer, all sharing the same horizontal camera, on a plain
+    /// background (every other lane a little lighter).
     fn draw_race(&mut self, painter: &egui::Painter, rect: Rect) {
         let n = self.race.len();
         let lane_h = rect.height() / n as f32;
@@ -682,7 +683,8 @@ impl App {
             if k % 2 == 1 {
                 painter.rect_filled(lane, 0.0, Color32::from_rgb(33, 38, 48));
             }
-            draw_track(painter, lane, ground_y, &to_screen, (x0, x1), scale, &r.arena.terrain, k == n - 1 || lane_h > 60.0);
+            let marks = if k == n - 1 || lane_h > 60.0 { scene::Marks::Labels } else { scene::Marks::Stakes };
+            scene::track(painter, lane, ground_y, &to_screen, (x0, x1), scale, &r.arena.terrain, marks, scene::Backdrop::Plain);
             draw_creatures(&painter.with_clip_rect(lane.intersect(rect)), &r.arena, &[r.color], &to_screen, scale, 255);
             let d = r.arena.progress(0);
             // On a dark tag, so it stays readable in thin lanes.
@@ -724,12 +726,13 @@ fn finished(a: &Arena, sumo: bool) -> bool {
     }
 }
 
-/// One race lane: sky, the ground with its hills, distance marks and the
-/// start flag (see scene.rs; only the look, the physics are the arena's).
+/// One race lane (Train and Design tabs): sky, the ground with its hills,
+/// distance marks and the start flag (see scene.rs; only the look, the
+/// physics are the arena's).
 #[allow(clippy::too_many_arguments)]
 fn draw_track(painter: &egui::Painter, lane: Rect, ground_y: f32, to_screen: &impl Fn([f32; 2]) -> Pos2, x_range: (f32, f32), scale: f32, terrain: &[[f32; 2]], labels: bool) {
     let marks = if labels { scene::Marks::Labels } else { scene::Marks::Stakes };
-    scene::track(painter, lane, ground_y, to_screen, x_range, scale, terrain, marks);
+    scene::track(painter, lane, ground_y, to_screen, x_range, scale, terrain, marks, scene::Backdrop::Stadium);
 }
 
 /// The sumo platform of an arena, with its hills.
